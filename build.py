@@ -386,6 +386,11 @@ def setup_env_variables():
     print('PATH is {}'.format(os.environ.get('PATH')))
     print('IDF_PYTHON_ENV_PATH is {}'.format(os.environ.get('IDF_PYTHON_ENV_PATH')))
 
+    # set AT_CUSTOM_COMPONENTS to include at_custom_cmd example
+    at_custom_cmd_path = os.path.join(os.getcwd(), 'examples', 'at_custom_cmd')
+    os.environ['AT_CUSTOM_COMPONENTS'] = at_custom_cmd_path
+    print('AT_CUSTOM_COMPONENTS is {}'.format(os.environ.get('AT_CUSTOM_COMPONENTS')))
+
 def install_compilation_env(target):
     # set up ESP-IDF tools
     ESP_LOGI('Ready to set up ESP-IDF tools..')
