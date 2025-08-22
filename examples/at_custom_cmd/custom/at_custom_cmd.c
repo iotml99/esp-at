@@ -17,14 +17,16 @@
 #include "esp_log.h"
 
 #define MOUNT_POINT "/sdcard"
-#define PIN_NUM_MISO  CONFIG_EXAMPLE_PIN_MISO
-#define PIN_NUM_MOSI  CONFIG_EXAMPLE_PIN_MOSI
-#define PIN_NUM_CLK   CONFIG_EXAMPLE_PIN_CLK
-#define PIN_NUM_CS    CONFIG_EXAMPLE_PIN_CS
+// SD Card SPI pin definitions
+#define PIN_NUM_MISO  19
+#define PIN_NUM_MOSI  23
+#define PIN_NUM_CLK   18
+#define PIN_NUM_CS    5
 
 static const char *TAG = "at_sd_card";
 static sdmmc_card_t *sd_card = NULL;
 static bool sd_mounted = false;
+static int spi_host_slot = -1;
 
 static esp_err_t sd_card_mount(void)
 {
@@ -44,8 +46,12 @@ static esp_err_t sd_card_mount(void)
     
     const char mount_point[] = MOUNT_POINT;
     ESP_LOGI(TAG, "Initializing SD card");
+    ESP_LOGI(TAG, "Using pins - MISO: %d, MOSI: %d, CLK: %d, CS: %d", 
+             PIN_NUM_MISO, PIN_NUM_MOSI, PIN_NUM_CLK, PIN_NUM_CS);
 
     // Use SPI peripheral
+    // By default, SD card frequency is initialized to SDMMC_FREQ_DEFAULT (20MHz)
+    // For setting a specific frequency, use host.max_freq_khz (range 400kHz - 20MHz for SDSPI)
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     
     spi_bus_config_t bus_cfg = {
@@ -62,6 +68,9 @@ static esp_err_t sd_card_mount(void)
         ESP_LOGE(TAG, "Failed to initialize bus.");
         return ret;
     }
+    
+    // Store the slot for later cleanup
+    spi_host_slot = host.slot;
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
@@ -71,7 +80,13 @@ static esp_err_t sd_card_mount(void)
     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &sd_card);
 
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount filesystem (%s)", esp_err_to_name(ret));
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount filesystem. "
+                     "If you want the card to be formatted, set the format_if_mount_failed option.");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize the card (%s) (%d). "
+                     "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret), ret);
+        }
         spi_bus_free(host.slot);
         return ret;
     }
@@ -99,7 +114,10 @@ static esp_err_t sd_card_unmount(void)
     }
     
     // Free SPI bus
-    spi_bus_free(SDSPI_DEFAULT_HOST);
+    if (spi_host_slot != -1) {
+        spi_bus_free(spi_host_slot);
+        spi_host_slot = -1;
+    }
     
     sd_mounted = false;
     sd_card = NULL;
