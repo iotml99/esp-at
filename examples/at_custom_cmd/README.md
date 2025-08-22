@@ -1,6 +1,12 @@
 ### Description
 This `at_custom_cmd` example works as a component, allowing you to add your own AT commands under `at_custom_cmd` directory without modifying the [esp-at repository](https://github.com/espressif/esp-at) source code. This allows you to just host `at_custom_cmd` component in your git repository in a light-weight way, and it also allows you to freely choose any commit from the ESP-AT repository snapshot starting from February 2024 as the main project.
 
+This example has been extended to include SD card functionality with the following custom AT commands:
+- `AT+BNSD_MOUNT` - Mount SD card
+- `AT+BNSD_UNMOUNT` - Unmount SD card
+
+See [SD_CARD_COMMANDS.md](SD_CARD_COMMANDS.md) for detailed documentation of the SD card commands.
+
 ### Usage
 1. Add your codes into `at_custom_cmd/custom/**/*.c` and `at_custom_cmd/custom/**/*.h` files (you can also create new source files and header files).
 2. You may need to add more component dependencies into `at_custom_cmd/CMakeLists.txt` file if other components are used in your code.

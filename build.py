@@ -183,10 +183,21 @@ def build_project(platform_name, module_name, silence, build_args):
     exp_macro_cmd += '{} ESP_AT_PROJECT_PLATFORM=PLATFORM_{} &&'.format(sys_cmd, platform_name)
     exp_macro_cmd += '{} ESP_AT_MODULE_NAME={} &&'.format(sys_cmd, module_name)
     exp_macro_cmd += '{} ESP_AT_PROJECT_PATH={} &&'.format(sys_cmd, os.getcwd())
-    exp_macro_cmd += '{} SILENCE={}'.format(sys_cmd, silence)
+    exp_macro_cmd += '{} SILENCE={} &&'.format(sys_cmd, silence)
+    
+    # Add at_custom_cmd component automatically if it exists
+    at_custom_cmd_path = os.path.join(os.getcwd(), 'examples', 'at_custom_cmd')
+    if os.path.exists(at_custom_cmd_path):
+        existing_custom_components = os.environ.get('AT_CUSTOM_COMPONENTS', '')
+        if existing_custom_components:
+            custom_components = '{}{}{}'.format(existing_custom_components, sys_delimiter, at_custom_cmd_path)
+        else:
+            custom_components = at_custom_cmd_path
+        exp_macro_cmd += '{} AT_CUSTOM_COMPONENTS={} &&'.format(sys_cmd, custom_components)
+        ESP_LOGI('Including at_custom_cmd component from: {}'.format(at_custom_cmd_path))
 
     compile_cmd = '{} {} -DIDF_TARGET={} {}'.format(get_python(), tool, platform_name.lower(), build_args)
-    cmd = exp_macro_cmd + '&&' + compile_cmd
+    cmd = exp_macro_cmd + compile_cmd
     ret = subprocess.call(cmd, shell = True)
     if ret:
         raise Exception('idf.py build failed')
@@ -365,6 +376,16 @@ def setup_env_variables():
     # set IDF_PATH
     idf_path=os.path.join(os.getcwd(), 'esp-idf')
     os.environ['IDF_PATH']=idf_path
+
+    # Set up AT_CUSTOM_COMPONENTS to include at_custom_cmd if it exists
+    at_custom_cmd_path = os.path.join(os.getcwd(), 'examples', 'at_custom_cmd')
+    if os.path.exists(at_custom_cmd_path):
+        existing_custom_components = os.environ.get('AT_CUSTOM_COMPONENTS', '')
+        if existing_custom_components:
+            os.environ['AT_CUSTOM_COMPONENTS'] = '{}{}{}'.format(existing_custom_components, sys_delimiter, at_custom_cmd_path)
+        else:
+            os.environ['AT_CUSTOM_COMPONENTS'] = at_custom_cmd_path
+        ESP_LOGI('AT_CUSTOM_COMPONENTS set to include: {}'.format(os.environ['AT_CUSTOM_COMPONENTS']))
 
     # get ESP-IDF environment variables
     export_str = ''
