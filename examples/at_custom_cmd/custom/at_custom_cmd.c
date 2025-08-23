@@ -15,6 +15,7 @@
 #include "driver/spi_master.h"
 #include "driver/sdspi_host.h"
 #include "esp_log.h"
+#include <curl/curl.h>
 
 #define MOUNT_POINT "/sdcard"
 // SD Card SPI pin definitions
@@ -248,14 +249,104 @@ static uint8_t at_exe_cmd_test(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+/* Forward declarations for +BNCURL handlers (implemented later) */
+static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name);
+static uint8_t at_bncurl_cmd_query(uint8_t *cmd_name);
+static uint8_t at_bncurl_cmd_setup(uint8_t para_num);
+static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name);
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+TEST", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
     {"+BNSD_MOUNT", at_bnsd_mount_cmd_test, at_bnsd_mount_cmd_query, NULL, at_bnsd_mount_cmd_exe},
     {"+BNSD_UNMOUNT", at_bnsd_unmount_cmd_test, at_bnsd_unmount_cmd_query, NULL, at_bnsd_unmount_cmd_exe},
-    /**
-     * @brief You can define your own AT commands here.
-     */
+    {"+BNCURL", at_bncurl_cmd_test, at_bncurl_cmd_query, at_bncurl_cmd_setup, at_bncurl_cmd_exe},
+    /** Add further custom AT commands here */
 };
+
+/* ------------------ CURL AT COMMAND (+BNCURL) ------------------ */
+
+static long bncurl_last_http_code = -1;
+static char bncurl_last_url[128] = {0};
+static bool bncurl_curl_inited = false;
+
+typedef struct {
+    size_t total_bytes;
+} bncurl_ctx_t;
+
+static size_t bncurl_sink(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
+    if(!ptr || total == 0) return 0;
+    ctx->total_bytes += total;
+    /* sanitize then write directly to AT UART */
+    const unsigned char *src = (const unsigned char*)ptr;
+    while(total) {
+        size_t chunk = total > 256 ? 256 : total;
+        char buf[256];
+        memcpy(buf, src, chunk);
+        for(size_t i=0;i<chunk;i++){
+            unsigned char c=(unsigned char)buf[i];
+            if(c < 0x20 && c!='\r' && c!='\n' && c!='\t') buf[i]='.';
+        }
+        esp_at_port_write_data((const uint8_t*)buf, chunk);
+        src += chunk;
+        total -= chunk;
+    }
+    return size * nmemb;
+}
+
+static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
+    const char *msg = "Usage: AT+BNCURL? (last result) | AT+BNCURL (default URL) | AT+BNCURL=\"https://host/path\"\r\n";
+    esp_at_port_write_data((const uint8_t*)msg, strlen(msg));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_cmd_query(uint8_t *cmd_name) {
+    char out[196];
+    snprintf(out, sizeof(out), "+BNCURL: last_code=%ld, last_url=\"%s\"\r\n", bncurl_last_http_code, bncurl_last_url);
+    esp_at_port_write_data((uint8_t*)out, strlen(out));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t bncurl_perform(const char *url) {
+    if(!bncurl_curl_inited) { curl_global_init(CURL_GLOBAL_DEFAULT); bncurl_curl_inited = true; }
+    CURL *h = curl_easy_init();
+    if(!h) { const char *err = "+BNCURL: init failed\r\n"; esp_at_port_write_data((const uint8_t*)err, strlen(err)); return ESP_AT_RESULT_CODE_ERROR; }
+    bncurl_ctx_t ctx = { .total_bytes = 0 };
+    const char *start = "+BNCURL: BEGIN\r\n";
+    esp_at_port_write_data((const uint8_t*)start, strlen(start));
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, bncurl_sink);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, &ctx);
+    CURLcode rc = curl_easy_perform(h);
+    long http_code = 0; if(rc == CURLE_OK) curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &http_code);
+    bncurl_last_http_code = (rc==CURLE_OK)?http_code:-1;
+    strncpy(bncurl_last_url, url, sizeof(bncurl_last_url)-1); bncurl_last_url[sizeof(bncurl_last_url)-1]='\0';
+    curl_easy_cleanup(h);
+    char footer[96];
+    if(rc != CURLE_OK) {
+        snprintf(footer, sizeof(footer), "\r\n+BNCURL: ERROR %d %s (bytes %u)\r\n", rc, curl_easy_strerror(rc), (unsigned)ctx.total_bytes);
+        esp_at_port_write_data((uint8_t*)footer, strlen(footer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    } else {
+        snprintf(footer, sizeof(footer), "\r\n+BNCURL: END HTTP %ld, %u bytes\r\n", http_code, (unsigned)ctx.total_bytes);
+        esp_at_port_write_data((uint8_t*)footer, strlen(footer));
+        return ESP_AT_RESULT_CODE_OK;
+    }
+}
+
+static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
+    if(para_num != 1) return ESP_AT_RESULT_CODE_ERROR;
+    uint8_t *url = NULL;
+    if(esp_at_get_para_as_str(0, &url) != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
+    return bncurl_perform((const char*)url);
+}
+
+static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
+    return bncurl_perform("https://example.com/");
+}
+
 
 bool esp_at_custom_cmd_register(void)
 {
