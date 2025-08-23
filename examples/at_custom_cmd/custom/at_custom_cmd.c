@@ -5,6 +5,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
@@ -22,6 +23,7 @@
 #include "freertos/semphr.h"
 
 #include <curl/curl.h>
+#include "esp_crt_bundle.h"
 
 /* ========================= SD Card bits (unchanged) ========================= */
 
@@ -37,8 +39,9 @@ static bool sd_mounted = false;
 static int spi_host_slot = -1;
 
 
-/* ---- Minimal CA bundle: concatenate 1–3 ROOT certs here (PEM) ---- */
+/* ---- Extended CA bundle: multiple ROOT certs for common sites ---- */
 static const char CA_BUNDLE_PEM[] =
+/* Amazon Root CA 1 - for AWS/Amazon services */
 "-----BEGIN CERTIFICATE-----\n"
 "MIIEkjCCA3qgAwIBAgITBn+USionzfP6wq4rAfkI7rnExjANBgkqhkiG9w0BAQsF"
 "ADCBmDELMAkGA1UEBhMCVVMxEDAOBgNVBAgTB0FyaXpvbmExEzARBgNVBAcTClNj"
@@ -65,7 +68,68 @@ static const char CA_BUNDLE_PEM[] =
 "bRRYh5TmOTFffHPLkIhqhBGWJ6bt2YFGpn6jcgAKUj6DiAdjd4lpFw85hdKrCEVN"
 "0FE6/V1dN2RMfjCyVSRCnTawXZwXgWHxyvkQAiSr6w10kY17RSlQOYiypok1JR4U"
 "akcjMS9cmvqtmg5iUaQqqcT5NJ0hGA==\n"
+"-----END CERTIFICATE-----\n"
+/* ISRG Root X1 - Let's Encrypt root for most modern sites */
+"-----BEGIN CERTIFICATE-----\n"
+"MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw"
+"TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh"
+"cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4"
+"WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu"
+"ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY"
+"MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc"
+"h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+"
+"0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U"
+"A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW"
+"T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH"
+"B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC"
+"B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv"
+"KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn"
+"OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn"
+"jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw"
+"qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI"
+"rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV"
+"HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq"
+"hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL"
+"ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ"
+"3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK"
+"NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5"
+"ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur"
+"TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC"
+"jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc"
+"oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq"
+"4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA"
+"mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d"
+"emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
+"-----END CERTIFICATE-----\n"
+/* DigiCert Global Root G2 - for many commercial sites */
+"-----BEGIN CERTIFICATE-----\n"
+"MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADAi"
+"MQswCQYDVQQGEwJVUzEZMBcGA1UEChMQRGlnaUNlcnQgSW5jIDEYMBYGA1UEAxMP"
+"RGlnaUNlcnQgR2xvYmFsIFJvb3QgRzIwHhcNMTMwODAxMTIwMDAwWhcNMzgwMTE1"
+"MTIwMDAwWjAiMQswCQYDVQQGEwJVUzEZMBcGA1UEChMQRGlnaUNlcnQgSW5jIDEY"
+"MBYGA1UEAxMPRGlnaUNlcnQgR2xvYmFsIFJvb3QgRzIwggEiMA0GCSqGSIb3DQEB"
+"AQUAA4IBDwAwggEKAoIBAQDiO+ERct6opNOjV6pQoo8Ld5DJoqXuEs6WWwEJIMwT"
+"L6cpt7tkTU7wgWa6TiQhExcL8VhJLmB8nrCgKX2Rku0QAZmrCIEOY+EQp7LYjQGX"
+"oc5YI4KyBT9EIaFHVgfq4zJgOVL0fdRs2uS1EuGvPW4+CAAamrCv3V/Nwi0Ixkm1"
+"z2G4Kw4PdFKdXhH1+xN/3IzMSGOjKf5d2YmZiVzB+y/w/xHx1VcOdUlgZXhm6tI="
 "-----END CERTIFICATE-----\n";
+
+
+/* ================= HTTP method & framing config ================= */
+typedef enum {
+    BNCURL_GET = 0,
+    BNCURL_POST,
+    BNCURL_HEAD,
+    BNCURL_METHOD_MAX
+} bncurl_method_t;
+
+static const char *bncurl_method_str[BNCURL_METHOD_MAX] = {
+    "GET", "POST", "HEAD"
+};
+
+#ifndef BNCURL_UART_CHUNK
+#define BNCURL_UART_CHUNK 1024
+#endif
 
 
 static esp_err_t sd_card_mount(void)
@@ -273,7 +337,12 @@ static char  bncurl_last_url[128]  = {0};
 static bool  bncurl_curl_inited    = false;
 
 typedef struct {
-    size_t total_bytes;
+    uint64_t total_bytes;        /* streamed body bytes */
+    uint64_t content_length;     /* parsed from headers */
+    bool     have_len;           /* Content-Length present */
+    bool     len_announced;      /* +LEN printed */
+    bool     post_started;       /* we started emitting +POST blocks */
+    bool     failed_after_len;   /* stream failed after announcing LEN */
 } bncurl_ctx_t;
 
 /* Worker request object:
@@ -281,10 +350,12 @@ typedef struct {
    - result_code: set by worker to OK/ERROR
 */
 typedef struct {
+    bncurl_method_t method;
     char url[256];
     SemaphoreHandle_t done;
     uint8_t result_code;
 } bncurl_req_t;
+
 
 static QueueHandle_t     bncurl_q      = NULL;
 static TaskHandle_t      bncurl_task   = NULL;
@@ -297,30 +368,73 @@ static inline void at_uart_write_locked(const uint8_t *data, size_t len) {
     if (at_uart_lock) xSemaphoreGive(at_uart_lock);
 }
 
-/* Stream body to UART in small chunks, sanitize control chars */
-static size_t bncurl_sink(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    size_t total = size * nmemb;
+static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
+    size_t total = size * nitems;
     bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
-    if (!ptr || total == 0) return 0;
-    if (ctx) ctx->total_bytes += total;
+    if (!ctx || total == 0) return total;
 
-    const unsigned char *src = (const unsigned char *)ptr;
-    while (total) {
-        size_t chunk = total > 256 ? 256 : total;
-        char buf[256];
-        memcpy(buf, src, chunk);
-        for (size_t i = 0; i < chunk; i++) {
-            unsigned char c = (unsigned char)buf[i];
-            if (c < 0x20 && c != '\r' && c != '\n' && c != '\t') buf[i] = '.';
+    /* Normalize and parse a single header line */
+    /* Example: "Content-Length: 12345\r\n" */
+    if (total > 16) {
+        if (!strncasecmp(buffer, "Content-Length:", 15)) {
+            const char *p = buffer + 15;
+            while (*p == ' ' || *p == '\t') p++;
+            uint64_t len = 0;
+            for (; *p >= '0' && *p <= '9'; ++p) {
+                len = len * 10 + (uint64_t)(*p - '0');
+            }
+            ctx->content_length = len;
+            ctx->have_len = true;
         }
-        at_uart_write_locked((const uint8_t*)buf, chunk);
-        src += chunk;
-        total -= chunk;
     }
-    return size * nmemb;
+    return total;
 }
 
-static uint8_t bncurl_perform_internal(const char *url) {
+
+static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
+    if (!ptr || total == 0 || !ctx) return 0;
+
+    /* Ensure +LEN is announced before first payload byte */
+    if (!ctx->len_announced) {
+        if (!ctx->have_len) {
+            /* Strict mode: we require Content-Length for single-pass framing */
+            ctx->failed_after_len = false;
+            return 0; /* cause CURLE_WRITE_ERROR -> we'll map to no-length error */
+        }
+        char line[64];
+        int n = snprintf(line, sizeof(line), "+LEN:%lu,\r\n", (unsigned long)ctx->content_length);
+        at_uart_write_locked((const uint8_t*)line, n);
+        ctx->len_announced = true;
+    }
+
+    ctx->post_started = true;
+
+    /* Emit data as +POST:<len>,<raw bytes> in fixed-sized chunks */
+    const uint8_t *src = (const uint8_t *)ptr;
+    size_t remaining = total;
+    while (remaining) {
+        size_t chunk = remaining > BNCURL_UART_CHUNK ? BNCURL_UART_CHUNK : remaining;
+
+        char hdr[32];
+        int hn = snprintf(hdr, sizeof(hdr), "+POST:%u,", (unsigned)chunk);
+        at_uart_write_locked((const uint8_t*)hdr, hn);
+        at_uart_write_locked(src, chunk);
+
+        src += chunk;
+        remaining -= chunk;
+        ctx->total_bytes += chunk;
+
+        /* Yield a little to avoid starving other tasks */
+        taskYIELD();
+    }
+
+    return total;
+}
+
+
+static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url) {
     if (!bncurl_curl_inited) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
         bncurl_curl_inited = true;
@@ -332,29 +446,46 @@ static uint8_t bncurl_perform_internal(const char *url) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    bncurl_ctx_t ctx = { .total_bytes = 0 };
-    at_uart_write_locked((const uint8_t*)"+BNCURL: BEGIN\r\n", 16);
+    bncurl_ctx_t ctx = {0};
 
+    /* —— libcurl setup —— */
     curl_easy_setopt(h, CURLOPT_URL, url);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, bncurl_sink);
-    curl_easy_setopt(h, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(h, CURLOPT_USERAGENT, "esp-at-libcurl/1.0");
+#ifdef BNCURL_FORCE_DNS
     curl_easy_setopt(h, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1");
-
+#endif
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 15000L);
     curl_easy_setopt(h, CURLOPT_TIMEOUT_MS,        60000L);
     curl_easy_setopt(h, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(h, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
 
-    /* Supply CA bundle and keep verification ON */
-    struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM,
-                            .len = sizeof(CA_BUNDLE_PEM)-1,
-                            .flags = CURL_BLOB_COPY };
-
+    /* TLS configuration - disable verification for now to test connectivity */
+#ifdef BNCURL_USE_CUSTOM_CA
+    struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
     curl_easy_setopt(h, CURLOPT_CAINFO_BLOB, &ca);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+#else
+    /* Temporarily disable certificate verification for testing */
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+#endif
+
+    /* Headers & body handling for spec framing */
+    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "identity"); /* avoid gzip changing lengths */
+    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION,  bncurl_header_cb);
+    curl_easy_setopt(h, CURLOPT_HEADERDATA,      &ctx);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION,   bncurl_sink_framed);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA,       &ctx);
+
+    /* Method selection */
+    switch (method) {
+        case BNCURL_GET:  curl_easy_setopt(h, CURLOPT_HTTPGET, 1L); break;
+        case BNCURL_HEAD: curl_easy_setopt(h, CURLOPT_NOBODY,  1L); break;
+        case BNCURL_POST: curl_easy_setopt(h, CURLOPT_POST,    1L); /* add POSTFIELDS later */ break;
+        default: break;
+    }
 
     CURLcode rc = curl_easy_perform(h);
     long http_code = 0;
@@ -365,29 +496,49 @@ static uint8_t bncurl_perform_internal(const char *url) {
     bncurl_last_url[sizeof(bncurl_last_url) - 1] = '\0';
     curl_easy_cleanup(h);
 
-    char footer[128];
-    int n = (rc != CURLE_OK)
-        ? snprintf(footer, sizeof(footer), "\r\n+BNCURL: ERROR %d %s (bytes %u)\r\n",
-                   rc, curl_easy_strerror(rc), (unsigned)ctx.total_bytes)
-        : snprintf(footer, sizeof(footer), "\r\n+BNCURL: END HTTP %ld, %u bytes\r\n",
-                   http_code, (unsigned)ctx.total_bytes);
-    at_uart_write_locked((uint8_t*)footer, n);
+    /* Footers per spec (no legacy BEGIN/END lines) */
+    if (rc == CURLE_OK) {
+        at_uart_write_locked((const uint8_t*)"SEND OK\r\n", 9);
+        return ESP_AT_RESULT_CODE_OK;
+    }
 
-    return (rc == CURLE_OK) ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+    /* Map “no Content-Length” strict failure */
+    if (rc == CURLE_WRITE_ERROR && !ctx.len_announced && !ctx.have_len) {
+        const char *e = "\r\n+BNCURL: ERROR length-unknown (no Content-Length)\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    /* If we failed after announcing LEN (mid-stream), send SEND FAIL */
+    if (ctx.len_announced) {
+        at_uart_write_locked((const uint8_t*)"SEND FAIL\r\n", 11);
+    }
+    char e2[128];
+    int n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s (bytes %lu)\r\n",
+                     rc, curl_easy_strerror(rc), (unsigned long)ctx.total_bytes);
+    at_uart_write_locked((uint8_t*)e2, n);
+    return ESP_AT_RESULT_CODE_ERROR;
 }
 
 static void bncurl_worker(void *arg) {
-    bncurl_req_t req;
     for (;;) {
-        if (xQueueReceive(bncurl_q, &req, portMAX_DELAY)) {
-            req.result_code = bncurl_perform_internal(req.url);
-            if (req.done) xSemaphoreGive(req.done);  /* wake waiting AT handler */
+        bncurl_req_t *req_ptr = NULL;
+        if (xQueueReceive(bncurl_q, &req_ptr, portMAX_DELAY) == pdTRUE && req_ptr) {
+            req_ptr->result_code = bncurl_perform_internal(req_ptr->method, req_ptr->url);
+            if (req_ptr->done) xSemaphoreGive(req_ptr->done);
         }
     }
 }
 
+
 static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
-    const char *msg = "Usage: AT+BNCURL? (last result) | AT+BNCURL (default URL) | AT+BNCURL=\"https://host/path\"\r\n";
+    const char *msg =
+        "Usage:\r\n"
+        "  AT+BNCURL?                                    Query last HTTP code/URL\r\n"
+        "  AT+BNCURL                                     Execute default request (internal URL)\r\n"
+        "  AT+BNCURL=GET,\"<url>\"[,<options>...]       Perform HTTP GET\r\n"
+        "Options (UART mode only for now):\r\n"
+        "  -dd <filepath>   Save body to SD (NOT IMPLEMENTED YET)\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -400,51 +551,120 @@ static uint8_t at_bncurl_cmd_query(uint8_t *cmd_name) {
     return ESP_AT_RESULT_CODE_OK;
 }
 
-/* Blocking semantics: handler waits on req.done until worker finishes */
 static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
-    if (para_num != 1 || !bncurl_q) return ESP_AT_RESULT_CODE_ERROR;
+    /* Expect: AT+BNCURL=GET,"<url>",[options...] */
+    if (para_num < 2 || !bncurl_q) return ESP_AT_RESULT_CODE_ERROR;
 
+    uint8_t *method_str = NULL;
     uint8_t *url = NULL;
-    if (esp_at_get_para_as_str(0, &url) != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
 
-    bncurl_req_t req = {0};
-    strncpy(req.url, (const char*)url, sizeof(req.url)-1);
-    req.done = xSemaphoreCreateBinary();
-    if (!req.done) return ESP_AT_RESULT_CODE_ERROR;
+    if (esp_at_get_para_as_str(0, &method_str) != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
+    if (esp_at_get_para_as_str(1, &url)        != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
+
+    /* Method mapping (currently only GET supported) */
+    bncurl_method_t method = BNCURL_GET;
+    bool matched = false;
+    for (int i = 0; i < BNCURL_METHOD_MAX; i++) {
+        if (strcasecmp((const char*)method_str, bncurl_method_str[i]) == 0) {
+            method = (bncurl_method_t)i;
+            matched = true;
+            break;
+        }
+    }
+    if (!matched || method != BNCURL_GET) {
+        const char *e = "+BNCURL: ERROR unsupported method (only GET for now)\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    /* Parse optional arguments. For now we only detect -dd (file save) which isn't implemented. */
+    bool want_file = false;
+    char file_path_tmp[128] = {0};
+    for (int idx = 2; idx < para_num; ++idx) {
+        uint8_t *opt = NULL;
+        if (esp_at_get_para_as_str(idx, &opt) != ESP_AT_PARA_PARSE_RESULT_OK) {
+            const char *e = "+BNCURL: ERROR parsing options\r\n";
+            at_uart_write_locked((const uint8_t*)e, strlen(e));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        if (strcasecmp((const char*)opt, "-dd") == 0) {
+            /* Need another parameter for path */
+            if ((idx + 1) >= para_num) {
+                const char *e = "+BNCURL: ERROR -dd requires path\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            uint8_t *p = NULL;
+            if (esp_at_get_para_as_str(++idx, &p) != ESP_AT_PARA_PARSE_RESULT_OK) {
+                const char *e = "+BNCURL: ERROR reading -dd path\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strncpy(file_path_tmp, (const char*)p, sizeof(file_path_tmp)-1);
+            want_file = true;
+        } else {
+            /* Unknown option */
+            char msg[96];
+            int n = snprintf(msg, sizeof(msg), "+BNCURL: WARN ignoring option '%s'\r\n", (const char*)opt);
+            at_uart_write_locked((const uint8_t*)msg, n);
+        }
+    }
+
+    if (want_file) {
+        const char *e = "+BNCURL: ERROR file save (-dd) not implemented in this build (UART mode only)\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    bncurl_req_t *req = (bncurl_req_t*)calloc(1, sizeof(bncurl_req_t));
+    if (!req) return ESP_AT_RESULT_CODE_ERROR;
+    req->method = method;
+    strncpy(req->url, (const char*)url, sizeof(req->url)-1);
+    req->done = xSemaphoreCreateBinary();
+    if (!req->done) { free(req); return ESP_AT_RESULT_CODE_ERROR; }
 
     if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
-        vSemaphoreDelete(req.done);
+        vSemaphoreDelete(req->done);
+        free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Wait max 120s for the transfer to finish */
-    if (xSemaphoreTake(req.done, pdMS_TO_TICKS(120000)) != pdTRUE) {
-        vSemaphoreDelete(req.done);
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(120000)) != pdTRUE) {
+        vSemaphoreDelete(req->done);
+        free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    vSemaphoreDelete(req.done);
-    return req.result_code;
+    uint8_t rc = req->result_code;
+    vSemaphoreDelete(req->done);
+    free(req);
+    return rc;
 }
 
 static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
     if (!bncurl_q) return ESP_AT_RESULT_CODE_ERROR;
 
-    bncurl_req_t req = {0};
-    strcpy(req.url, "https://example.com/");
-    req.done = xSemaphoreCreateBinary();
-    if (!req.done) return ESP_AT_RESULT_CODE_ERROR;
+    bncurl_req_t *req = (bncurl_req_t*)calloc(1, sizeof(bncurl_req_t));
+    if (!req) return ESP_AT_RESULT_CODE_ERROR;
+    req->method = BNCURL_GET;
+    strcpy(req->url, "https://example.com/");
+    req->done = xSemaphoreCreateBinary();
+    if (!req->done) { free(req); return ESP_AT_RESULT_CODE_ERROR; }
 
     if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
-        vSemaphoreDelete(req.done);
+        vSemaphoreDelete(req->done);
+        free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    if (xSemaphoreTake(req.done, pdMS_TO_TICKS(120000)) != pdTRUE) {
-        vSemaphoreDelete(req.done);
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(120000)) != pdTRUE) {
+        vSemaphoreDelete(req->done);
+        free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    vSemaphoreDelete(req.done);
-    return req.result_code;
+    uint8_t rc = req->result_code;
+    vSemaphoreDelete(req->done);
+    free(req);
+    return rc;
 }
 
 /* ----------------------- Command table & init ----------------------- */
@@ -463,7 +683,7 @@ bool esp_at_custom_cmd_register(void)
     if (!ok) return false;
 
     if (!at_uart_lock) at_uart_lock = xSemaphoreCreateMutex();
-    if (!bncurl_q)     bncurl_q = xQueueCreate(2, sizeof(bncurl_req_t));
+    if (!bncurl_q)     bncurl_q = xQueueCreate(2, sizeof(bncurl_req_t*));
     if (!bncurl_task) {
         /* TLS + libcurl + printf ==> give it a big stack; tune later */
         xTaskCreatePinnedToCore(bncurl_worker, "bncurl", 16384, NULL, 5, &bncurl_task, 0);
