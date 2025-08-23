@@ -343,6 +343,8 @@ typedef struct {
     bool     len_announced;      /* +LEN printed */
     bool     post_started;       /* we started emitting +POST blocks */
     bool     failed_after_len;   /* stream failed after announcing LEN */
+    FILE     *save_file;         /* file handle for -dd option */
+    bool     save_to_file;       /* true if saving to file instead of UART */
 } bncurl_ctx_t;
 
 /* Worker request object:
@@ -352,6 +354,8 @@ typedef struct {
 typedef struct {
     bncurl_method_t method;
     char url[256];
+    char save_path[256];         /* file path for -dd option */
+    bool save_to_file;           /* true if saving to file */
     SemaphoreHandle_t done;
     uint8_t result_code;
 } bncurl_req_t;
@@ -396,6 +400,26 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
     bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
     if (!ptr || total == 0 || !ctx) return 0;
 
+    /* If saving to file, write directly to file */
+    if (ctx->save_to_file && ctx->save_file) {
+        /* Announce length once if not done */
+        if (!ctx->len_announced && ctx->have_len) {
+            char line[64];
+            int n = snprintf(line, sizeof(line), "+LEN:%lu,\r\n", (unsigned long)ctx->content_length);
+            at_uart_write_locked((const uint8_t*)line, n);
+            ctx->len_announced = true;
+        }
+        
+        size_t written = fwrite(ptr, 1, total, ctx->save_file);
+        if (written != total) {
+            at_uart_write_locked((const uint8_t*)"+BNCURL: ERROR writing to file\r\n", 33);
+            return 0; /* Signal error to curl */
+        }
+        ctx->total_bytes += written;
+        return total;
+    }
+
+    /* UART output mode (existing framed logic) */
     /* Ensure +LEN is announced before first payload byte */
     if (!ctx->len_announced) {
         if (!ctx->have_len) {
@@ -434,7 +458,7 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
 }
 
 
-static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url) {
+static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, const char *save_path, bool save_to_file) {
     if (!bncurl_curl_inited) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
         bncurl_curl_inited = true;
@@ -447,6 +471,30 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url) 
     }
 
     bncurl_ctx_t ctx = {0};
+    ctx.save_to_file = save_to_file;
+    
+    /* Open file if saving to SD card */
+    if (save_to_file && save_path) {
+        /* Check if SD card is mounted */
+        if (!sd_mounted) {
+            const char *err = "+BNCURL: ERROR SD card not mounted\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            curl_easy_cleanup(h);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        ctx.save_file = fopen(save_path, "wb");
+        if (!ctx.save_file) {
+            const char *err = "+BNCURL: ERROR cannot open file for writing\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            curl_easy_cleanup(h);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        char msg[128];
+        int n = snprintf(msg, sizeof(msg), "+BNCURL: Saving to file: %s\r\n", save_path);
+        at_uart_write_locked((const uint8_t*)msg, n);
+    }
 
     /* —— libcurl setup —— */
     curl_easy_setopt(h, CURLOPT_URL, url);
@@ -455,21 +503,30 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url) 
 #ifdef BNCURL_FORCE_DNS
     curl_easy_setopt(h, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1");
 #endif
-    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 15000L);
-    curl_easy_setopt(h, CURLOPT_TIMEOUT_MS,        60000L);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  /* Increased timeout */
+    curl_easy_setopt(h, CURLOPT_TIMEOUT_MS,        120000L); /* Increased timeout */
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 60L);
     curl_easy_setopt(h, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
-    curl_easy_setopt(h, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPIDLE, 120L);
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPINTVL, 60L);
 
-    /* TLS configuration - disable verification for now to test connectivity */
+    /* TLS configuration - simplified for ESP32 compatibility */
 #ifdef BNCURL_USE_CUSTOM_CA
     struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
     curl_easy_setopt(h, CURLOPT_CAINFO_BLOB, &ca);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
 #else
-    /* Temporarily disable certificate verification for testing */
+    /* Disable certificate verification for testing - let mbedTLS choose ciphers */
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+    /* Let libcurl/mbedTLS negotiate the best available TLS version and ciphers */
+    curl_easy_setopt(h, CURLOPT_SSLVERSION, CURL_SSLVERSION_DEFAULT);
+#ifdef BNCURL_VERBOSE_TLS
+    curl_easy_setopt(h, CURLOPT_VERBOSE, 1L);
+#endif
 #endif
 
     /* Headers & body handling for spec framing */
@@ -494,10 +551,22 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url) 
     bncurl_last_http_code = (rc == CURLE_OK) ? http_code : -1;
     strncpy(bncurl_last_url, url, sizeof(bncurl_last_url) - 1);
     bncurl_last_url[sizeof(bncurl_last_url) - 1] = '\0';
+    
+    /* Close file if it was opened */
+    if (ctx.save_file) {
+        fclose(ctx.save_file);
+        ctx.save_file = NULL;
+    }
+    
     curl_easy_cleanup(h);
 
-    /* Footers per spec (no legacy BEGIN/END lines) */
+    /* Results and error reporting */
     if (rc == CURLE_OK) {
+        if (save_to_file) {
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg), "+BNCURL: File saved (%lu bytes)\r\n", (unsigned long)ctx.total_bytes);
+            at_uart_write_locked((const uint8_t*)msg, n);
+        }
         at_uart_write_locked((const uint8_t*)"SEND OK\r\n", 9);
         return ESP_AT_RESULT_CODE_OK;
     }
@@ -524,7 +593,9 @@ static void bncurl_worker(void *arg) {
     for (;;) {
         bncurl_req_t *req_ptr = NULL;
         if (xQueueReceive(bncurl_q, &req_ptr, portMAX_DELAY) == pdTRUE && req_ptr) {
-            req_ptr->result_code = bncurl_perform_internal(req_ptr->method, req_ptr->url);
+            req_ptr->result_code = bncurl_perform_internal(req_ptr->method, req_ptr->url, 
+                                                          req_ptr->save_to_file ? req_ptr->save_path : NULL, 
+                                                          req_ptr->save_to_file);
             if (req_ptr->done) xSemaphoreGive(req_ptr->done);
         }
     }
@@ -537,8 +608,14 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  AT+BNCURL?                                    Query last HTTP code/URL\r\n"
         "  AT+BNCURL                                     Execute default request (internal URL)\r\n"
         "  AT+BNCURL=GET,\"<url>\"[,<options>...]       Perform HTTP GET\r\n"
-        "Options (UART mode only for now):\r\n"
-        "  -dd <filepath>   Save body to SD (NOT IMPLEMENTED YET)\r\n";
+        "Options:\r\n"
+        "  -dd <filepath>   Save body to SD card file (requires mounted SD)\r\n"
+        "Examples:\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
+        "  AT+BNCURL=GET,\"https://httpbin.org/get\"      Stream to UART (HTTPS)\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/response.json\"   Save to file (HTTP)\r\n"
+        "  AT+BNCURL=GET,\"https://httpbin.org/get\",-dd,\"/sdcard/response.json\"  Save to file (HTTPS)\r\n"
+        "Note: Try HTTP first if HTTPS has TLS issues\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -577,49 +654,50 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Parse optional arguments. For now we only detect -dd (file save) which isn't implemented. */
+    /* Parse optional arguments. Now -dd (file save) is implemented. */
     bool want_file = false;
     char file_path_tmp[128] = {0};
-    for (int idx = 2; idx < para_num; ++idx) {
+    
+    /* Check if we have at least 4 parameters for -dd option */
+    if (para_num >= 4) {
+        /* Try to parse parameter 2 as the -dd flag */
         uint8_t *opt = NULL;
-        if (esp_at_get_para_as_str(idx, &opt) != ESP_AT_PARA_PARSE_RESULT_OK) {
-            const char *e = "+BNCURL: ERROR parsing options\r\n";
-            at_uart_write_locked((const uint8_t*)e, strlen(e));
-            return ESP_AT_RESULT_CODE_ERROR;
-        }
-        if (strcasecmp((const char*)opt, "-dd") == 0) {
-            /* Need another parameter for path */
-            if ((idx + 1) >= para_num) {
-                const char *e = "+BNCURL: ERROR -dd requires path\r\n";
+        esp_at_para_parse_result_type result = esp_at_get_para_as_str(2, &opt);
+        
+        if (result == ESP_AT_PARA_PARSE_RESULT_OK && opt && strcasecmp((const char*)opt, "-dd") == 0) {
+            /* Found -dd flag, now get the file path from parameter 3 */
+            uint8_t *path = NULL;
+            result = esp_at_get_para_as_str(3, &path);
+            
+            if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
+                strncpy(file_path_tmp, (const char*)path, sizeof(file_path_tmp)-1);
+                want_file = true;
+                
+                /* Debug: confirm file path received */
+                char debug_msg[128];
+                int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG file path set to: %s\r\n", file_path_tmp);
+                at_uart_write_locked((const uint8_t*)debug_msg, n);
+            } else {
+                const char *e = "+BNCURL: ERROR reading -dd path parameter\r\n";
                 at_uart_write_locked((const uint8_t*)e, strlen(e));
                 return ESP_AT_RESULT_CODE_ERROR;
             }
-            uint8_t *p = NULL;
-            if (esp_at_get_para_as_str(++idx, &p) != ESP_AT_PARA_PARSE_RESULT_OK) {
-                const char *e = "+BNCURL: ERROR reading -dd path\r\n";
-                at_uart_write_locked((const uint8_t*)e, strlen(e));
-                return ESP_AT_RESULT_CODE_ERROR;
-            }
-            strncpy(file_path_tmp, (const char*)p, sizeof(file_path_tmp)-1);
-            want_file = true;
         } else {
-            /* Unknown option */
-            char msg[96];
-            int n = snprintf(msg, sizeof(msg), "+BNCURL: WARN ignoring option '%s'\r\n", (const char*)opt);
-            at_uart_write_locked((const uint8_t*)msg, n);
+            /* Debug: show parsing issue */
+            char debug_msg[128];
+            int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG param 2 not -dd flag (result=%d)\r\n", result);
+            at_uart_write_locked((const uint8_t*)debug_msg, n);
         }
-    }
-
-    if (want_file) {
-        const char *e = "+BNCURL: ERROR file save (-dd) not implemented in this build (UART mode only)\r\n";
-        at_uart_write_locked((const uint8_t*)e, strlen(e));
-        return ESP_AT_RESULT_CODE_ERROR;
     }
 
     bncurl_req_t *req = (bncurl_req_t*)calloc(1, sizeof(bncurl_req_t));
     if (!req) return ESP_AT_RESULT_CODE_ERROR;
     req->method = method;
     strncpy(req->url, (const char*)url, sizeof(req->url)-1);
+    req->save_to_file = want_file;
+    if (want_file) {
+        strncpy(req->save_path, file_path_tmp, sizeof(req->save_path)-1);
+    }
     req->done = xSemaphoreCreateBinary();
     if (!req->done) { free(req); return ESP_AT_RESULT_CODE_ERROR; }
 
@@ -647,6 +725,7 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
     if (!req) return ESP_AT_RESULT_CODE_ERROR;
     req->method = BNCURL_GET;
     strcpy(req->url, "https://example.com/");
+    req->save_to_file = false;  /* Default execute doesn't save to file */
     req->done = xSemaphoreCreateBinary();
     if (!req->done) { free(req); return ESP_AT_RESULT_CODE_ERROR; }
 
