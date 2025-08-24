@@ -28,10 +28,12 @@
 /* ========================= SD Card bits (unchanged) ========================= */
 
 #define MOUNT_POINT "/sdcard"
-#define PIN_NUM_MISO  19
-#define PIN_NUM_MOSI  23
-#define PIN_NUM_CLK   18
-#define PIN_NUM_CS    5
+
+
+#define PIN_NUM_CS    16
+#define PIN_NUM_MOSI  17
+#define PIN_NUM_CLK   21
+#define PIN_NUM_MISO  20
 
 static const char *TAG = "at_sd_card";
 static sdmmc_card_t *sd_card = NULL;
