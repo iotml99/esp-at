@@ -30,10 +30,10 @@
 #define MOUNT_POINT "/sdcard"
 
 
-#define PIN_NUM_CS    16
-#define PIN_NUM_MOSI  17
-#define PIN_NUM_CLK   21
-#define PIN_NUM_MISO  20
+#define PIN_NUM_CS    20
+#define PIN_NUM_MOSI  21
+#define PIN_NUM_CLK   17
+#define PIN_NUM_MISO  16
 
 static const char *TAG = "at_sd_card";
 static sdmmc_card_t *sd_card = NULL;
