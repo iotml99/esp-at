@@ -1,6 +1,0 @@
-python-dotenv>=1.0.0
-pyserial>=3.5
-pytest>=7.0.0
-pytest-html>=3.1.0
-pytest-timeout>=2.1.0
-configparser>=5.3.0
