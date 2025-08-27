@@ -31,6 +31,8 @@
 #include "esp_partition.h"
 #include "esp_flash.h"
 #include "esp_event.h"
+#include <time.h>
+#include "esp_sntp.h"
 
 /* ========================= SD Card bits (unchanged) ========================= */
 
@@ -140,6 +142,13 @@ static const char *bncurl_method_str[BNCURL_METHOD_MAX] = {
 #define BNCURL_UART_CHUNK 1024
 #endif
 
+/* Dynamic chunk sizes based on content length for optimal throughput */
+#define BNCURL_SMALL_FILE_THRESHOLD (1024 * 1024)      /* 1MB */
+#define BNCURL_LARGE_FILE_THRESHOLD (50 * 1024 * 1024) /* 50MB */
+#define BNCURL_SMALL_CHUNK 2048    /* 2KB for small files */
+#define BNCURL_MEDIUM_CHUNK 8192   /* 8KB for medium files */  
+#define BNCURL_LARGE_CHUNK 16384   /* 16KB for large files */
+
 
 static esp_err_t sd_card_mount(void)
 {
@@ -226,8 +235,157 @@ static esp_err_t sd_card_unmount(void)
     return ESP_OK;
 }
 
+/* ========================= Kill Switch Functions ========================= */
+
+/* Parse time from WorldTimeAPI JSON response */
+static bool parse_time_from_json(const char* json_data, time_t* timestamp) {
+    if (!json_data || !timestamp) return false;
+    
+    /* Look for "unixtime": field in JSON */
+    const char* unixtime_key = "\"unixtime\":";
+    char* unixtime_pos = strstr(json_data, unixtime_key);
+    if (!unixtime_pos) return false;
+    
+    /* Move past the key */
+    unixtime_pos += strlen(unixtime_key);
+    
+    /* Skip whitespace */
+    while (*unixtime_pos == ' ' || *unixtime_pos == '\t') {
+        unixtime_pos++;
+    }
+    
+    /* Parse the unix timestamp */
+    *timestamp = (time_t)atoll(unixtime_pos);
+    return (*timestamp > 0);
+}
+
+/* CURL callback to collect server response */
+static size_t time_response_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t realsize = size * nmemb;
+    char** response_data = (char**)userp;
+    
+    if (*response_data == NULL) {
+        *response_data = malloc(realsize + 1);
+        if (*response_data == NULL) return 0;
+        memcpy(*response_data, contents, realsize);
+        (*response_data)[realsize] = '\0';
+    } else {
+        /* Append to existing data */
+        size_t current_len = strlen(*response_data);
+        char* temp = realloc(*response_data, current_len + realsize + 1);
+        if (temp == NULL) return 0;
+        *response_data = temp;
+        memcpy(*response_data + current_len, contents, realsize);
+        (*response_data)[current_len + realsize] = '\0';
+    }
+    
+    return realsize;
+}
+
+/* Get current time from server */
+static bool get_server_time(time_t* current_time) {
+    if (!current_time) return false;
+    
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+    
+    char* response_data = NULL;
+    CURLcode res;
+    
+    /* Configure CURL */
+    curl_easy_setopt(curl, CURLOPT_URL, TIME_SERVER_URL);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, time_response_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "esp-at-killswitch/1.0");
+    
+    /* Perform the request */
+    res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    
+    bool success = false;
+    if (res == CURLE_OK && response_data) {
+        success = parse_time_from_json(response_data, current_time);
+    }
+    
+    if (response_data) {
+        free(response_data);
+    }
+    
+    return success;
+}
+
+/* Initialize kill switch by checking server time */
+static void init_kill_switch(void) {
+    if (kill_switch_initialized) return;
+    
+    /* Set up expiry date: September 20, 2025 */
+    struct tm expiry_tm = {0};
+    expiry_tm.tm_year = KILL_SWITCH_EXPIRY_YEAR - 1900;  /* tm_year is years since 1900 */
+    expiry_tm.tm_mon = KILL_SWITCH_EXPIRY_MONTH - 1;     /* tm_mon is 0-11 */
+    expiry_tm.tm_mday = KILL_SWITCH_EXPIRY_DAY;
+    expiry_tm.tm_hour = 0;
+    expiry_tm.tm_min = 0;
+    expiry_tm.tm_sec = 0;
+    kill_switch_expiry = mktime(&expiry_tm);
+    
+    /* Initialize curl if needed */
+    if (!bncurl_curl_inited) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        bncurl_curl_inited = true;
+    }
+    
+    /* Get current time from server */
+    time_t current_time = 0;
+    bool time_received = get_server_time(&current_time);
+    
+    if (time_received) {
+        /* Check if current time is past expiry */
+        if (current_time >= kill_switch_expiry) {
+            kill_switch_expired = true;
+            ESP_LOGE(TAG, "FIRMWARE EXPIRED: Current time %ld >= Expiry time %ld", 
+                     (long)current_time, (long)kill_switch_expiry);
+        } else {
+            kill_switch_expired = false;
+            ESP_LOGI(TAG, "Firmware valid until %s", ctime(&kill_switch_expiry));
+        }
+    } else {
+        /* Could not get server time - assume expired for security */
+        kill_switch_expired = true;
+        ESP_LOGW(TAG, "Could not verify server time - assuming firmware expired");
+    }
+    
+    kill_switch_initialized = true;
+}
+
+/* Check if firmware has expired */
+static bool is_firmware_expired(void) {
+    /* Initialize on first call */
+    if (!kill_switch_initialized) {
+        init_kill_switch();
+    }
+    
+    return kill_switch_expired;
+}
+
+/* Universal command validation function */
+static uint8_t validate_firmware_status(void) {
+    if (is_firmware_expired()) {
+        at_uart_write_locked((const uint8_t*)FIRMWARE_EXPIRED_MSG, strlen(FIRMWARE_EXPIRED_MSG));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 static uint8_t at_bnsd_mount_cmd_test(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     uint8_t buffer[64] = {0};
     snprintf((char *)buffer, 64, "AT%s=? - Test SD card mount command\r\n", cmd_name);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -236,6 +394,9 @@ static uint8_t at_bnsd_mount_cmd_test(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_mount_cmd_query(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     uint8_t buffer[64] = {0};
     snprintf((char *)buffer, 64, "AT%s? - SD card mount status: %s\r\n", cmd_name, sd_mounted ? "MOUNTED" : "UNMOUNTED");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -244,6 +405,9 @@ static uint8_t at_bnsd_mount_cmd_query(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_mount_cmd_exe(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     esp_err_t ret = sd_card_mount();
     uint8_t buffer[128] = {0};
     if (ret == ESP_OK) {
@@ -259,6 +423,9 @@ static uint8_t at_bnsd_mount_cmd_exe(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_unmount_cmd_test(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     uint8_t buffer[64] = {0};
     snprintf((char *)buffer, 64, "AT%s=? - Test SD card unmount command\r\n", cmd_name);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -267,6 +434,9 @@ static uint8_t at_bnsd_unmount_cmd_test(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_unmount_cmd_query(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     uint8_t buffer[64] = {0};
     snprintf((char *)buffer, 64, "AT%s? - SD card mount status: %s\r\n", cmd_name, sd_mounted ? "MOUNTED" : "UNMOUNTED");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -275,6 +445,9 @@ static uint8_t at_bnsd_unmount_cmd_query(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_unmount_cmd_exe(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     esp_err_t ret = sd_card_unmount();
     uint8_t buffer[128] = {0};
     if (ret == ESP_OK) {
@@ -291,6 +464,9 @@ static uint8_t at_bnsd_unmount_cmd_exe(uint8_t *cmd_name)
 /* ========================= SD Card Format Command ========================= */
 static uint8_t at_bnsd_format_cmd_test(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     uint8_t buffer[64] = {0};
     snprintf((char *)buffer, 64, "AT%s - Format SD card to FAT32\r\n", cmd_name);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -299,6 +475,9 @@ static uint8_t at_bnsd_format_cmd_test(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_format_cmd_exe(uint8_t *cmd_name)
 {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     uint8_t buffer[128] = {0};
     
     if (!sd_mounted) {
@@ -439,6 +618,12 @@ static bool  bncurl_curl_inited    = false;
 static bool stop_requested = false;
 static long custom_timeout_seconds = 30;  /* Default 30 seconds */
 
+/* Download performance statistics */
+static uint64_t total_bytes_downloaded = 0;
+static uint32_t total_downloads = 0;
+static uint32_t last_download_time_ms = 0;
+static uint64_t last_download_bytes = 0;
+
 /* WPS global variables */
 static bool wps_active = false;
 static TimerHandle_t wps_timer = NULL;
@@ -449,6 +634,16 @@ static bool webradio_active = false;
 static bool webradio_stop_requested = false;
 static TaskHandle_t webradio_task = NULL;
 static char webradio_url[256] = {0};
+
+/* Kill switch variables - firmware validity check */
+static bool kill_switch_initialized = false;
+static bool kill_switch_expired = false;
+static time_t kill_switch_expiry = 0;
+static const char* TIME_SERVER_URL = "http://worldtimeapi.org/api/timezone/UTC";
+#define KILL_SWITCH_EXPIRY_YEAR 2025
+#define KILL_SWITCH_EXPIRY_MONTH 9  /* September */
+#define KILL_SWITCH_EXPIRY_DAY 20
+static const char* FIRMWARE_EXPIRED_MSG = "FIRMWARE VALIDITY EXPIRED\r\n";
 
 /* Worker request object:
    - done: semaphore the AT handler waits on (so command is user-visible blocking)
@@ -973,6 +1168,19 @@ static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *u
     return total;
 }
 
+/* Get optimal chunk size based on content length for better throughput */
+static size_t get_optimal_chunk_size(uint64_t content_length) {
+    if (content_length == 0) {
+        return BNCURL_UART_CHUNK; /* Default for unknown size */
+    } else if (content_length < BNCURL_SMALL_FILE_THRESHOLD) {
+        return BNCURL_SMALL_CHUNK; /* 2KB for files < 1MB */
+    } else if (content_length < BNCURL_LARGE_FILE_THRESHOLD) {
+        return BNCURL_MEDIUM_CHUNK; /* 8KB for files 1MB-50MB */
+    } else {
+        return BNCURL_LARGE_CHUNK; /* 16KB for files > 50MB */
+    }
+}
+
 
 static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
@@ -994,7 +1202,13 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
             at_uart_write_locked((const uint8_t*)"+BNCURL: ERROR writing to file\r\n", 33);
             return 0; /* Signal error to curl */
         }
+        
+        /* Flush periodically for large files to ensure data integrity */
         ctx->total_bytes += written;
+        if (ctx->total_bytes % (512 * 1024) == 0) { /* Flush every 512KB */
+            fflush(ctx->save_file);
+        }
+        
         return total;
     }
 
@@ -1014,11 +1228,13 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
 
     ctx->post_started = true;
 
-    /* Emit data as +POST:<len>,<raw bytes> in fixed-sized chunks */
+    /* Emit data as +POST:<len>,<raw bytes> in optimized chunks */
     const uint8_t *src = (const uint8_t *)ptr;
     size_t remaining = total;
+    size_t optimal_chunk = get_optimal_chunk_size(ctx->have_len ? ctx->content_length : 0);
+    
     while (remaining) {
-        size_t chunk = remaining > BNCURL_UART_CHUNK ? BNCURL_UART_CHUNK : remaining;
+        size_t chunk = remaining > optimal_chunk ? optimal_chunk : remaining;
 
         char hdr[32];
         int hn = snprintf(hdr, sizeof(hdr), "+POST:%u,", (unsigned)chunk);
@@ -1029,30 +1245,46 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
         remaining -= chunk;
         ctx->total_bytes += chunk;
 
-        /* Yield a little to avoid starving other tasks */
-        taskYIELD();
+        /* Reduced yield frequency for better throughput */
+        if (ctx->total_bytes % (optimal_chunk * 4) == 0) {
+            taskYIELD();
+        }
     }
 
     return total;
 }
 
 
-/* Calculate timeout based on content length */
+/* Calculate timeout based on content length with improved speed assumptions */
 static long calculate_timeout_ms(uint64_t content_length) {
     if (content_length == 0) {
         return 600000L; /* Default 10 minutes for unknown size */
     }
     
-    /* More conservative timeout calculation for large files */
-    /* Assume minimum speed of 20KB/s (160 Kbps) for very slow connections */
-    /* Add larger safety margin for connection setup, TLS handshake, and network fluctuations */
-    const uint64_t min_speed_bytes_per_sec = 20 * 1024; /* 20 KB/s - very conservative */
-    const long base_timeout_ms = 120000L; /* 2 minutes base for connection setup */
-    const long max_timeout_ms = 7200000L; /* 2 hours maximum for very large files */
-    const long min_timeout_ms = 600000L; /* 10 minutes minimum */
+    /* Improved timeout calculation with realistic speed assumptions */
+    /* Assume minimum speed based on file size for better optimization */
+    uint64_t min_speed_bytes_per_sec;
+    long base_timeout_ms;
     
-    /* Calculate timeout with 3x safety margin for unstable connections */
-    long calculated_timeout = base_timeout_ms + (content_length * 3000 / min_speed_bytes_per_sec);
+    if (content_length > BNCURL_LARGE_FILE_THRESHOLD) {
+        /* Large files: assume 50KB/s minimum (400 Kbps) */
+        min_speed_bytes_per_sec = 50 * 1024;
+        base_timeout_ms = 180000L; /* 3 minutes base */
+    } else if (content_length > BNCURL_SMALL_FILE_THRESHOLD) {
+        /* Medium files: assume 100KB/s minimum (800 Kbps) */
+        min_speed_bytes_per_sec = 100 * 1024;
+        base_timeout_ms = 120000L; /* 2 minutes base */
+    } else {
+        /* Small files: assume 200KB/s minimum (1.6 Mbps) */
+        min_speed_bytes_per_sec = 200 * 1024;
+        base_timeout_ms = 60000L; /* 1 minute base */
+    }
+    
+    const long max_timeout_ms = 7200000L; /* 2 hours maximum */
+    const long min_timeout_ms = 300000L;  /* 5 minutes minimum */
+    
+    /* Calculate timeout with 2x safety margin (reduced from 3x for better performance) */
+    long calculated_timeout = base_timeout_ms + (content_length * 2000 / min_speed_bytes_per_sec);
     
     /* Clamp to reasonable bounds */
     if (calculated_timeout < min_timeout_ms) calculated_timeout = min_timeout_ms;
@@ -1061,8 +1293,9 @@ static long calculate_timeout_ms(uint64_t content_length) {
     /* Log timeout calculation for debugging */
     char debug_msg[128];
     int n = snprintf(debug_msg, sizeof(debug_msg), 
-                    "+BNCURL: Size %lu bytes -> timeout %lu ms (%.1f min)\r\n", 
-                    (unsigned long)content_length, calculated_timeout, calculated_timeout / 60000.0);
+                    "+BNCURL: Size %lu bytes -> timeout %lu ms (%.1f min) [Speed: %luKB/s min]\r\n", 
+                    (unsigned long)content_length, calculated_timeout, calculated_timeout / 60000.0,
+                    (unsigned long)(min_speed_bytes_per_sec / 1024));
     at_uart_write_locked((const uint8_t*)debug_msg, n);
     
     return calculated_timeout;
@@ -1192,18 +1425,30 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 60000L);  /* Extended connection timeout */
     curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, timeout_ms);     /* Auto-calculated timeout */
     
-    /* More aggressive low speed timeout settings for unstable connections */
-    long low_speed_time = 300L; /* 5 minutes low speed timeout */
-    long low_speed_limit = 1L;  /* 1 byte/sec minimum */
+    /* Optimized low speed timeout settings based on file size */
+    long low_speed_time;
+    long low_speed_limit;
     
-    if (content_length > 50 * 1024 * 1024) { /* Files > 50MB */
-        low_speed_time = 600L; /* 10 minutes for very large files */
-        low_speed_limit = 1L;  /* Very lenient for large files */
+    if (content_length > BNCURL_LARGE_FILE_THRESHOLD) {
+        /* Large files: More lenient settings for sustained downloads */
+        low_speed_time = 600L;  /* 10 minutes */
+        low_speed_limit = 1024L; /* 1KB/sec minimum */
+    } else if (content_length > BNCURL_SMALL_FILE_THRESHOLD) {
+        /* Medium files: Balanced settings */
+        low_speed_time = 300L;  /* 5 minutes */
+        low_speed_limit = 2048L; /* 2KB/sec minimum */
+    } else {
+        /* Small files: Stricter settings for faster response */
+        low_speed_time = 120L;  /* 2 minutes */
+        low_speed_limit = 4096L; /* 4KB/sec minimum */
     }
     
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, low_speed_limit);
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, low_speed_time);
-    curl_easy_setopt(h, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+    
+    /* HTTP version optimization - try HTTP/2 first for better performance */
+    curl_easy_setopt(h, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+    /* Fallback to HTTP/1.1 if HTTP/2 is not available */
     
     /* Enhanced TCP keep-alive settings for long transfers */
     curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
@@ -1214,8 +1459,30 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     curl_easy_setopt(h, CURLOPT_FORBID_REUSE, 0L);
     curl_easy_setopt(h, CURLOPT_FRESH_CONNECT, 0L);
     
-    /* Buffer size optimization for large downloads */
-    curl_easy_setopt(h, CURLOPT_BUFFERSIZE, 65536L); /* 64KB buffer */
+    /* Dynamic buffer size optimization based on content length */
+    long buffer_size = 65536L; /* Default 64KB */
+    if (content_length > 0) {
+        if (content_length > BNCURL_LARGE_FILE_THRESHOLD) {
+            buffer_size = 131072L; /* 128KB for very large files */
+        } else if (content_length > BNCURL_SMALL_FILE_THRESHOLD) {
+            buffer_size = 98304L;  /* 96KB for medium files */
+        } else {
+            buffer_size = 32768L;  /* 32KB for small files */
+        }
+    }
+    curl_easy_setopt(h, CURLOPT_BUFFERSIZE, buffer_size);
+    
+    char buffer_msg[80];
+    int buffer_n = snprintf(buffer_msg, sizeof(buffer_msg), 
+                           "+BNCURL: Using %ldKB buffer for optimal throughput\r\n", buffer_size / 1024);
+    at_uart_write_locked((const uint8_t*)buffer_msg, buffer_n);
+
+    /* Compression and encoding optimization */
+    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "gzip, deflate"); /* Enable compression */
+    
+    /* Connection optimization for better throughput */
+    curl_easy_setopt(h, CURLOPT_MAXCONNECTS, 5L); /* Connection pool size */
+    curl_easy_setopt(h, CURLOPT_MAXREDIRS, 10L);  /* Allow redirects for CDNs */
 
     /* TLS configuration - simplified for ESP32 compatibility */
 #ifdef BNCURL_USE_CUSTOM_CA
@@ -1330,11 +1597,15 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
         at_uart_write_locked((const uint8_t*)debug_msg, n);
     }
 
-    /* Retry logic for unstable connections */
+    /* Retry logic for unstable connections with performance tracking */
     int max_retries = 3;
     int retry_count = 0;
     CURLcode rc = CURLE_OK;
     long http_code = 0;
+    
+    /* Performance tracking */
+    uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    uint64_t download_bytes = 0;
     
     while (retry_count <= max_retries) {
         if (retry_count > 0) {
@@ -1437,6 +1708,26 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
             at_uart_write_locked((const uint8_t*)retry_msg, n);
         }
         
+        /* Update performance statistics */
+        uint32_t end_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        uint32_t download_time = end_time - start_time;
+        download_bytes = ctx.total_bytes;
+        
+        total_downloads++;
+        total_bytes_downloaded += download_bytes;
+        last_download_time_ms = download_time;
+        last_download_bytes = download_bytes;
+        
+        /* Display throughput information */
+        if (download_time > 0 && download_bytes > 0) {
+            uint32_t speed_kbps = (download_bytes * 1000) / (download_time * 1024);
+            char perf_msg[100];
+            int n = snprintf(perf_msg, sizeof(perf_msg), 
+                           "+BNCURL: Throughput %lu KB/s (%lu bytes in %lu ms)\r\n",
+                           (unsigned long)speed_kbps, (unsigned long)download_bytes, (unsigned long)download_time);
+            at_uart_write_locked((const uint8_t*)perf_msg, n);
+        }
+        
         at_uart_write_locked((const uint8_t*)"SEND OK\r\n", 9);
         return ESP_AT_RESULT_CODE_OK;
     }
@@ -1506,6 +1797,9 @@ static void bncurl_worker(void *arg) {
 
 
 static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     const char *msg =
         "Usage:\r\n"
         "  AT+BNCURL?                                    Query last HTTP code/URL\r\n"
@@ -1548,6 +1842,9 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
 }
 
 static uint8_t at_bncurl_cmd_query(uint8_t *cmd_name) {
+    uint8_t validation_result = validate_firmware_status();
+    if (validation_result != ESP_AT_RESULT_CODE_OK) return validation_result;
+    
     char out[196];
     snprintf(out, sizeof(out), "+BNCURL: last_code=%ld, last_url=\"%s\"\r\n",
              bncurl_last_http_code, bncurl_last_url);
@@ -1661,6 +1958,30 @@ static uint8_t at_bncurl_timeout_cmd_setup(uint8_t para_num) {
     snprintf(out, sizeof(out), "+BNCURL_TIMEOUT: set to %ld seconds\r\n", custom_timeout_seconds);
     at_uart_write_locked((const uint8_t*)out, strlen(out));
     
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* Performance statistics: AT+BNCURL_STATS */
+static uint8_t at_bncurl_stats_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"+BNCURL_STATS\r\n", 16);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_stats_cmd_query(uint8_t *cmd_name) {
+    char out[256];
+    uint32_t avg_speed_kbps = 0;
+    
+    if (last_download_time_ms > 0 && last_download_bytes > 0) {
+        /* Calculate speed in KB/s for last download */
+        avg_speed_kbps = (last_download_bytes * 1000) / (last_download_time_ms * 1024);
+    }
+    
+    snprintf(out, sizeof(out), 
+             "+BNCURL_STATS: downloads=%lu, total_bytes=%llu, last_speed=%luKB/s\r\n",
+             (unsigned long)total_downloads, 
+             (unsigned long long)total_bytes_downloaded,
+             (unsigned long)avg_speed_kbps);
+    at_uart_write_locked((const uint8_t*)out, strlen(out));
     return ESP_AT_RESULT_CODE_OK;
 }
 
@@ -2460,6 +2781,7 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL_PROG",  at_bncurl_prog_cmd_test, at_bncurl_prog_cmd_query, NULL,          NULL},
     {"+BNCURL_STOP",  at_bncurl_stop_cmd_test, at_bncurl_stop_cmd_query, NULL,          NULL},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_cmd_test, at_bncurl_timeout_cmd_query, at_bncurl_timeout_cmd_setup, NULL},
+    {"+BNCURL_STATS", at_bncurl_stats_cmd_test, at_bncurl_stats_cmd_query, NULL,        NULL},
     {"+BNWEBRADIO",   at_bnwebradio_cmd_test, at_bnwebradio_cmd_query, at_bnwebradio_cmd_setup, NULL},
     {"+BNWEBRADIO_STOP", at_bnwebradio_stop_cmd_test, at_bnwebradio_stop_cmd_query, NULL, NULL},
     {"+BNWPS",        at_bnwps_cmd_test,       at_bnwps_cmd_query,       at_bnwps_cmd_setup,       NULL},

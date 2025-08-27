@@ -846,3 +846,657 @@ Randomized mix of GET/POST/HEAD; ensure no deadlocks; average latency stable.
 ---
 
 **End of Testbook**
+
+
+# ESP32 Internet Module Complete Test Cases
+
+## 1. WPS (WiFi Protected Setup) Tests
+
+### 1.1 WPS Connection Tests
+- `AT+BNWPS="30"` (30 second WPS window)
+- `AT+BNWPS="1"` (minimum 1 second)
+- `AT+BNWPS="120"` (maximum timeout)
+- `AT+BNWPS="300"` (beyond reasonable limit)
+
+### 1.2 WPS Status Query Tests
+- `AT+BNWPS?` (query current WPS state)
+- Send `AT+BNWPS?` immediately after `AT+BNWPS="30"`
+- Send `AT+BNWPS?` after WPS timeout expires
+- Send multiple `AT+BNWPS?` queries in sequence
+
+### 1.3 WPS Cancellation Tests
+- `AT+BNWPS="0"` (cancel WPS mode)
+- `AT+BNWPS="0"` when not in WPS mode
+- Cancel WPS during active connection attempt
+
+### 1.4 WPS Error Cases
+- `AT+BNWPS=""` (empty parameter)
+- `AT+BNWPS="-5"` (negative timeout)
+- `AT+BNWPS="abc"` (non-numeric parameter)
+- `AT+BNWPS` (missing parameter)
+
+### 1.5 Expected WPS Responses
+```
+Success: +CWJAP:"MySSID","aa:bb:cc:dd:ee:ff",6,-45,1,0,0,0,3
+         OK
+Error:   +CWJAP:1
+         ERROR
+Status:  +BNWPS:"1" (active) or +BNWPS:"0" (inactive)
+         OK
+```
+
+## 2. Certificate Management Tests
+
+### 2.1 Flash Certificate from SD Card
+- `AT+BNFLASH_CERT="0x2A000","@/certs/server.crt"`
+- `AT+BNFLASH_CERT="0x2B000","@/certs/client.key"`
+- `AT+BNFLASH_CERT="0x2C000","@/certs/ca-bundle.pem"`
+- `AT+BNFLASH_CERT="0x10000","@/certs/root_ca.crt"` (different address)
+
+### 2.2 Flash Certificate via UART
+- `AT+BNFLASH_CERT="0x2A000","1400"` (expect `>` prompt, then 1400 bytes)
+- `AT+BNFLASH_CERT="0x2B000","500"` (small certificate)
+- `AT+BNFLASH_CERT="0x2C000","0"` (zero bytes - error case)
+- `AT+BNFLASH_CERT="0x2D000","65536"` (large certificate)
+
+### 2.3 Certificate Error Cases
+- `AT+BNFLASH_CERT="","1400"` (empty address)
+- `AT+BNFLASH_CERT="invalid","1400"` (non-hex address)
+- `AT+BNFLASH_CERT="0x2A000","@/nonexistent.crt"` (file not found)
+- `AT+BNFLASH_CERT="0x2A000",""` (empty data source)
+- `AT+BNFLASH_CERT="0x2A000","-100"` (negative byte count)
+- `AT+BNFLASH_CERT="0x2A000","abc"` (non-numeric byte count)
+
+### 2.4 Certificate Address Tests
+- `AT+BNFLASH_CERT="0x0","1000"` (address zero)
+- `AT+BNFLASH_CERT="0xFFFFFFFF","1000"` (maximum address)
+- `AT+BNFLASH_CERT="0x1000","1000"` (4KB aligned)
+- Multiple certificates at different addresses
+
+## 3. Enhanced BNCURL Tests (All Parameters in Quotes)
+
+### 3.1 Basic Method Tests (Quoted Parameters)
+- `AT+BNCURL="GET","https://httpbin.org/get"`
+- `AT+BNCURL="POST","https://httpbin.org/post"`
+- `AT+BNCURL="HEAD","https://httpbin.org/get"`
+
+### 3.2 Header Tests with Quotes
+- `AT+BNCURL="GET","https://httpbin.org/get","-H","Content-Type: application/json"`
+- `AT+BNCURL="GET","https://httpbin.org/get","-H","User-Agent: ESP32-Client/1.0","-H","Accept: application/json"`
+
+### 3.3 Nested Quotes in Headers
+- `AT+BNCURL="GET","https://httpbin.org/get","-H","SOAPAction: \"/getQuestions\""`
+- `AT+BNCURL="GET","https://httpbin.org/get","-H","X-Custom: \"quoted value\""`
+- `AT+BNCURL="GET","https://httpbin.org/get","-H","Authorization: Bearer \"token with spaces\""`
+
+### 3.4 Data Upload Tests (Quoted)
+- `AT+BNCURL="POST","https://httpbin.org/post","-du","100"`
+- `AT+BNCURL="POST","https://httpbin.org/post","-du","@/test/upload.xml"`
+- `AT+BNCURL="POST","https://httpbin.org/post","-du","0"`
+
+### 3.5 Data Download Tests (Quoted)
+- `AT+BNCURL="GET","https://httpbin.org/json","-dd","/download/test.json"`
+- `AT+BNCURL="GET","https://httpbin.org/xml","-dd","@result.xml"`
+
+### 3.6 Cookie Tests (Quoted)
+- `AT+BNCURL="GET","https://httpbin.org/cookies/set/test/value","-c","session_cookies"`
+- `AT+BNCURL="GET","https://httpbin.org/cookies","-b","session_cookies"`
+- `AT+BNCURL="GET","https://httpbin.org/cookies/set/user/john","-c",""`
+
+### 3.7 Range Tests (Quoted)
+- `AT+BNCURL="GET","https://httpbin.org/range/1024","-r","0-511"`
+- `AT+BNCURL="GET","https://httpbin.org/range/1024","-r","512-1023"`
+- `AT+BNCURL="GET","https://httpbin.org/range/1024","-r","100-200"`
+
+### 3.8 Verbose Tests (Quoted)
+- `AT+BNCURL="GET","https://httpbin.org/get","-v"`
+- `AT+BNCURL="POST","https://httpbin.org/post","-du","50","-v"`
+
+## 4. Progress Monitoring Tests
+
+### 4.1 Valid Progress Queries
+- Start: `AT+BNCURL="GET","https://httpbin.org/drip?duration=5&numbytes=10000","-dd","/large_file.bin"`
+- During transfer: `AT+BNCURL_PROG?`
+- Expected response: `+BNCURL_PROG:"2048/10000"` or similar
+- After completion: `AT+BNCURL_PROG?`
+
+### 4.2 Progress with File Upload
+- Start: `AT+BNCURL="POST","https://httpbin.org/post","-du","@/large_upload.bin"`
+- During transfer: `AT+BNCURL_PROG?`
+- Multiple progress queries during same transfer
+
+### 4.3 Progress Error Cases
+- `AT+BNCURL_PROG?` (no active transfer)
+- `AT+BNCURL_PROG?` (after transfer completed)
+- `AT+BNCURL_PROG?` (during UART-only transfer - should error)
+
+## 5. Transfer Cancellation Tests
+
+### 5.1 Valid Cancellations
+- Start: `AT+BNCURL="GET","https://httpbin.org/drip?duration=10&numbytes=50000","-dd","/cancel_test.bin"`
+- Cancel: `AT+BNCURL_STOP?`
+- Expected: `+BNCURL_STOP:` followed by `OK`
+
+### 5.2 Cancellation during Upload
+- Start: `AT+BNCURL="POST","https://httpbin.org/post","-du","10000"`
+- Send partial data, then: `AT+BNCURL_STOP?`
+- Verify proper cleanup
+
+### 5.3 Cancellation Error Cases
+- `AT+BNCURL_STOP?` (no active transfer)
+- `AT+BNCURL_STOP?` (UART-only transfer - should error)
+- Multiple cancellation attempts
+
+## 6. Timeout Management Tests
+
+### 6.1 Valid Timeout Settings
+- `AT+BNCURL_TIMEOUT="1"` (minimum 1 second)
+- `AT+BNCURL_TIMEOUT="30"` (default value)
+- `AT+BNCURL_TIMEOUT="120"` (maximum 120 seconds)
+- `AT+BNCURL_TIMEOUT="60"`
+
+### 6.2 Timeout Query
+- `AT+BNCURL_TIMEOUT?`
+- Expected: `+BNCURL_TIMEOUT: "30"` (or current value)
+
+### 6.3 Invalid Timeout Values
+- `AT+BNCURL_TIMEOUT="0"` (below minimum)
+- `AT+BNCURL_TIMEOUT="121"` (above maximum)
+- `AT+BNCURL_TIMEOUT="-10"` (negative)
+- `AT+BNCURL_TIMEOUT="abc"` (non-numeric)
+- `AT+BNCURL_TIMEOUT=""` (empty)
+
+### 6.4 Timeout Behavior Tests
+- Set timeout to 5 seconds: `AT+BNCURL_TIMEOUT="5"`
+- Test with slow server: `AT+BNCURL="GET","https://httpbin.org/delay/10"`
+- Should timeout after 5 seconds with appropriate error
+
+## 7. SD Card Management Tests
+
+### 7.1 Mount/Unmount Operations
+- `AT+BNSD_MOUNT` (mount new SD card)
+- `AT+BNSD_UNMOUNT` (unmount current card)
+- `AT+BNSD_MOUNT` (when already mounted)
+- `AT+BNSD_UNMOUNT` (when already unmounted)
+
+### 7.2 Hot Swap Sequence
+1. `AT+BNSD_UNMOUNT`
+2. Physical card swap
+3. `AT+BNSD_MOUNT`
+4. Verify file operations work
+
+### 7.3 Mount/Unmount Error Cases
+- `AT+BNSD_MOUNT` (no card inserted)
+- `AT+BNSD_MOUNT` (corrupted card)
+- `AT+BNSD_MOUNT` (non-FAT32 card)
+- `AT+BNSD_UNMOUNT` (during active file transfer)
+
+### 7.4 Expected Mount/Unmount Responses
+```
+Success: +BNSD_MOUNT:
+         OK
+Error:   +BNSD_MOUNT:
+         ERROR
+```
+
+## 8. SD Card Formatting Tests
+
+### 8.1 Valid Format Operations
+- `AT+BNSD_FORMAT` (format mounted card)
+- Verify FAT32 format after completion
+- Test file operations after format
+
+### 8.2 Format Error Cases
+- `AT+BNSD_FORMAT` (no card mounted)
+- `AT+BNSD_FORMAT` (write-protected card)
+- `AT+BNSD_FORMAT` (during active file transfer)
+- `AT+BNSD_FORMAT` (card removed during format)
+
+### 8.3 Format Interruption Tests
+- Start format, then try other operations
+- Power cycle during format
+- Card removal during format
+
+## 9. SD Card Space Information Tests
+
+### 9.1 Valid Space Queries
+- `AT+BNSD_SPACE` (get space info)
+- Expected format: `+BNSD_SIZE: "15456000000/4035037"`
+- Query after file operations
+- Query on nearly full card
+
+### 9.2 Space Query Error Cases
+- `AT+BNSD_SPACE` (no card mounted)
+- `AT+BNSD_SPACE` (corrupted filesystem)
+- `AT+BNSD_SPACE` (card removed)
+
+### 9.3 Space Information Validation
+- Verify total + free = reported total
+- Test with various card sizes (1GB, 8GB, 32GB, 64GB)
+- Verify values after file operations
+
+## 10. UART Speed Configuration Tests
+
+### 10.1 Baud Rate Settings
+- Default: 115200 baud operation
+- Switch to: 3000000 baud (3Mbaud) at runtime
+- Test command processing at different speeds
+- Verify data integrity at high speeds
+
+### 10.2 High-Speed Data Transfer Tests
+- Large file download at 3Mbaud
+- Chunked UART output verification at high speed
+- Flow control testing (`-` and `+` signals)
+
+## 11. Complex Integration Tests
+
+### 11.1 Complete Workflow Tests
+```
+1. AT+BNWPS="30" (connect via WPS)
+2. AT+BNSD_MOUNT (mount SD card)
+3. AT+BNFLASH_CERT="0x2A000","@/certs/server.crt" (load certificates)
+4. AT+BNCURL_TIMEOUT="60" (set timeout)
+5. AT+BNCURL="POST","https://secure-api.example.com/upload","-du","@/data/payload.xml","-H","Content-Type: text/xml","-c","session_cookies","-v"
+6. AT+BNCURL_PROG? (monitor progress)
+7. AT+BNCURL="GET","https://secure-api.example.com/result","-b","session_cookies","-dd","/results/response.xml"
+8. AT+BNSD_SPACE (check remaining space)
+```
+
+### 11.2 Multi-part Download Sequence (from spec)
+```
+AT+BNCURL="GET","http://blibu.dzb.de:8082/prod/blibu/cGetDaisyRange/ms/24/1/53008/3607109/22263/04_1.mp3/","-r","0-2097151","-dd","/audio/part1.mp3"
+AT+BNCURL="GET","http://blibu.dzb.de:8082/prod/blibu/cGetDaisyRange/ms/24/1/53008/3607109/22263/04_1.mp3/","-r","2097152-4194303","-dd","/audio/part2.mp3"
+AT+BNCURL="GET","http://blibu.dzb.de:8082/prod/blibu/cGetDaisyRange/ms/24/1/53008/3607109/22263/04_1.mp3/","-r","4194304-6291455","-dd","/audio/part3.mp3"
+```
+
+### 11.3 SOAP Request Test (from spec)
+```
+AT+BNCURL="POST","https://blibu.dzb.de:8093/dibbsDaisy/services/dibbsDaisyPort/","-du","385","-H","Cookie: JSESSIONID=FC33F4334E8FE8074194BCCD9053C148","-H","Content-Type: text/xml;charset=UTF-8","-H","SOAPAction: \"/getQuestions\""
+```
+Expected: `>` prompt, then send 385-byte SOAP envelope
+
+### 11.4 Weather API Test (from spec)
+```
+AT+BNCURL="GET","https://api.openweathermap.org/data/2.5/weather?lat=42.567001&lon=1.598100&appid=e5eb4def9773176630cc8f18e75be406&lang=tr&units=metric"
+```
+
+## 12. Error Recovery and Edge Cases
+
+### 12.1 Network Interruption Tests
+- Start large download, disconnect WiFi
+- Reconnect and verify error handling
+- Test timeout behavior during network loss
+
+### 12.2 SD Card Removal Tests
+- Remove card during file download
+- Remove card during file upload from SD
+- Remove card during format operation
+
+### 12.3 Memory and Resource Tests
+- Multiple simultaneous certificate loads
+- Large file operations with low memory
+- Resource cleanup after errors
+
+### 12.4 Malformed Command Tests
+- `AT+BNCURL="GET","https://example.com","-H"` (incomplete header)
+- `AT+BNCURL="GET","https://example.com","-invalid","param"` (unknown parameter)
+- Very long command lines (>1KB)
+- Commands with unmatched quotes
+
+## 13. UART Protocol Validation Tests
+
+### 13.1 Data Upload Flow Validation
+```
+Host: AT+BNCURL="POST","https://httpbin.org/post","-du","100"
+ESP32: >
+Host: [exactly 100 bytes]
+ESP32: [process and respond]
+```
+
+### 13.2 Data Download Flow Validation (UART Output)
+```
+Host: AT+BNCURL="GET","https://httpbin.org/json"
+ESP32: +LEN:"543",
+ESP32: +POST:"512",[512 bytes of JSON]
+ESP32: +POST:"31",[remaining 31 bytes]
+ESP32: SEND OK
+```
+
+### 13.3 Chunked Transfer Validation
+- Verify exact `+POST:"512",` format (with comma)
+- Test chunk boundaries don't break data
+- Verify final `SEND OK` message
+- Test very large responses (>10MB) with many chunks
+
+### 13.4 Flow Control Tests (if implemented)
+- Large upload with `-` (pause) and `+` (resume) signals
+- Verify proper host response to flow control
+- Test flow control during high-speed transfers
+
+## 14. Certificate and TLS Tests
+
+### 14.1 TLS Version Negotiation
+- Connect to TLS 1.2 servers
+- Connect to TLS 1.3 servers
+- Test automatic version negotiation
+
+### 14.2 Certificate Validation
+- Valid certificates (Let's Encrypt, commercial CA)
+- Self-signed certificates
+- Expired certificates
+- Wrong hostname certificates
+
+### 14.3 Custom Certificate Usage
+- Flash custom CA certificate
+- Test connection using custom certificate
+- Multiple certificate chains
+
+## 15. File System Integration Tests
+
+### 15.1 File Path Validation
+- Valid paths: `"/Download/53008/nlzt0003.smil"`
+- Paths with spaces: `"/My Files/test file.txt"`
+- Deep directory structures
+- Unicode filenames
+
+### 15.2 File Operation Edge Cases
+- Download to existing file (overwrite)
+- Download with insufficient space
+- Upload from empty file
+- Upload from very large file (>1GB)
+
+### 15.3 @ Prefix Handling
+- Download: `-dd,"@result.xml"` (@ should be omitted from filename)
+- Upload: `-du,"@/source/file.bin"` (@ indicates SD card file)
+- Verify correct @ handling in both cases
+
+## 16. Performance and Stress Tests
+
+### 16.1 High-Speed Transfer Tests
+- 3Mbaud UART with large file transfers
+- Verify data integrity at maximum speed
+- Test sustained high-speed operations
+
+### 16.2 Concurrent Operation Tests
+- Certificate flash during network operation
+- SD operations during HTTP transfer
+- Multiple HTTP requests in sequence
+
+### 16.3 Memory Stress Tests
+- Very large HTTP responses
+- Multiple large certificate loads
+- Fragmented memory conditions
+
+## 17. Real-World Scenario Tests
+
+### 17.1 Daisy Book Download (from spec example)
+```
+AT+BNCURL="GET","http://blibu.dzb.de:8082/prod/blibu/cGetDaisyRange/ms/24/1/53008/3607109/22263/nlzt0003.smil/","-dd","/Download/53008/nlzt0003.smil"
+```
+
+### 17.2 Multi-part Media Download
+- Download large audio file in 2MB chunks
+- Verify proper range request handling
+- Test with redirected URLs
+
+### 17.3 Session-based API Interaction
+1. Login request with cookie saving
+2. Authenticated API calls using saved cookies
+3. Session timeout handling
+4. Logout request
+
+## 18. Error Response Validation
+
+### 18.1 Expected Success Responses
+- `OK` for successful operations
+- `+BNCURL_PROG:"bytes/total"` for progress
+- `+LEN:"size",` for UART data length
+- `+POST:"chunk_size",data` for chunked data
+- `SEND OK` for transfer completion
+
+### 18.2 Expected Error Responses
+- `ERROR` for general failures
+- `+BNCURL_STOP: ERROR` for invalid cancellation
+- Specific error codes for different failures
+- Proper cleanup after errors
+
+## 19. Security and Validation Tests
+
+### 19.1 Input Validation
+- SQL injection in URLs
+- Command injection in headers
+- Buffer overflow attempts
+- Malicious certificate data
+
+### 19.2 TLS Security Validation
+- Certificate pinning (if implemented)
+- Weak cipher rejection
+- Protocol downgrade protection
+
+## 20. Interoperability Tests
+
+### 20.1 Server Compatibility
+- Apache servers
+- Nginx servers
+- IIS servers
+- CDN endpoints (CloudFlare, AWS)
+
+### 20.2 Protocol Compatibility
+- HTTP/1.1 servers
+- HTTP/2 servers (if supported)
+- Various authentication schemes
+
+## Test Execution Strategy
+
+### Phase 1: Basic Functionality
+1. WPS and WiFi connection
+2. Basic GET/POST commands
+3. SD card operations
+
+### Phase 2: Advanced Features
+1. Certificate management
+2. Progress monitoring and cancellation
+3. Timeout configuration
+
+### Phase 3: Integration Testing
+1. Complete workflows
+2. Real-world API interactions
+3. Multi-part transfers
+
+### Phase 4: Stress and Edge Cases
+1. High-speed transfers
+2. Error conditions
+3. Resource limits
+
+### Validation Checklist for Each Test:
+- [ ] Command syntax accepted/rejected correctly
+- [ ] Network operation behaves as expected  
+- [ ] UART protocol format matches specification
+- [ ] File operations work correctly
+- [ ] Error handling is appropriate
+- [ ] Resource cleanup after completion/failure
+- [ ] Response format matches specification
+
+### Critical Test Points:
+1. **Quoted Parameters**: All parameters must be in double quotes
+2. **Nested Quotes**: Proper handling of `\"` in headers
+3. **UART Protocol**: Exact `+LEN:`, `+POST:` format compliance
+4. **Flow Control**: Test `-` and `+` signals for UART flow control
+5. **Certificate Management**: Proper flashing and validation
+6. **Hot Swap**: SD card mount/unmount during operation
+7. **Progress Accuracy**: Real-time progress reporting
+8. **Range Requests**: Proper HTTP Range header handling with redirects
+
+## 21. Web Radio/Podcast Streaming Tests (AT+BNWEBRADIO)
+
+### 21.1 Basic Web Radio Streaming
+- `AT+BNWEBRADIO="http://ice1.somafm.com/groovesalad-256-mp3"` (MP3 stream)
+- `AT+BNWEBRADIO="http://relay.broadcastify.com/123456789"` (Emergency scanner)
+- `AT+BNWEBRADIO="https://radio.example.com:8000/stream.mp3"` (HTTPS with port)
+- `AT+BNWEBRADIO="http://stream.live365.com/a12345"` (AAC stream)
+
+### 21.2 Podcast URL Streaming
+- `AT+BNWEBRADIO="https://podcast.example.com/episode123.mp3"`
+- `AT+BNWEBRADIO="http://feeds.example.com/podcast/latest.m4a"`
+- `AT+BNWEBRADIO="https://cdn.example.com/audio/stream.aac"`
+
+### 21.3 Pure Binary Output Validation
+- Start stream: `AT+BNWEBRADIO="http://ice1.somafm.com/groovesalad-256-mp3"`
+- Verify **NO** `+LEN:` or `+POST:512,` prefixes in output
+- Verify raw MP3/AAC frames go directly to UART
+- Check for valid MP3 frame headers (0xFF 0xFB, etc.)
+- Verify continuous data flow without protocol overhead
+
+### 21.4 Different Audio Formats
+- MP3 streams: Various bitrates (128k, 192k, 320k)
+- AAC streams: Different profiles
+- OGG streams (if supported)
+- Unknown/unsupported formats (should error gracefully)
+
+### 21.5 Web Radio Stop Tests
+- `AT+BNWEBRADIO_STOP` (stop active stream)
+- `AT+BNWEBRADIO_STOP` (no active stream - should error)
+- Multiple stop commands in sequence
+- Stop during stream startup/buffering
+
+### 21.6 Stream Interruption and Recovery
+- Start stream, stop after 30 seconds
+- Start new stream immediately after stop
+- Network disconnection during stream
+- Server-side stream termination handling
+
+### 21.7 Long-Duration Streaming Tests
+- Stream for 1+ hours continuously
+- Memory usage monitoring during long streams
+- Buffer management validation
+- Automatic reconnection on stream interruption
+
+### 21.8 Concurrent Operation Tests
+- `AT+BNWEBRADIO="http://stream1.example.com/radio.mp3"`
+- During stream: `AT+BNCURL="GET","https://api.example.com/status"` (should fail - resource conflict)
+- During stream: `AT+BNSD_SPACE` (should work - read-only operation)
+- During stream: `AT+BNWPS?` (should work - status query)
+
+### 21.9 Stream URL Edge Cases
+- Redirected stream URLs (301/302 to actual stream)
+- Password-protected streams: `http://user:pass@stream.example.com/radio`
+- Very long URLs with parameters
+- URLs with special characters and encoding
+
+### 21.10 Authentication and Headers for Streams
+- Streams requiring custom headers
+- User-Agent requirements for certain streams
+- Referer header requirements
+- Cookie-based stream authentication
+
+### 21.11 Error Handling for Web Radio
+- `AT+BNWEBRADIO=""` (empty URL)
+- `AT+BNWEBRADIO="ftp://invalid.protocol/stream"` (unsupported protocol)
+- `AT+BNWEBRADIO="http://nonexistent.stream.com/radio"` (DNS failure)
+- `AT+BNWEBRADIO="http://example.com/notastream.txt"` (non-audio content)
+
+### 21.12 Binary Data Integrity Tests
+- Capture stream output and verify MP3 frame sync
+- Check for protocol artifacts in binary data
+- Validate audio decoder compatibility
+- Test with various MP3 encoders (LAME, etc.)
+
+### 21.13 Stream Metadata Handling
+- ICY metadata in MP3 streams (song titles, etc.)
+- Should metadata be stripped or passed through?
+- Handling of variable bitrate streams
+- Stream title and genre information
+
+### 21.14 Buffer Management Tests
+- Test startup latency (time to first audio data)
+- Buffer underrun conditions
+- High bitrate streams (320kbps+)
+- Low bitrate streams (64kbps)
+
+### 21.15 Network Quality Tests
+- Streaming over poor WiFi connection
+- Packet loss simulation
+- Bandwidth limitation tests
+- Jitter and latency impact
+
+### 21.16 Expected Web Radio Responses
+```
+Start Success:
+AT+BNWEBRADIO="http://stream.example.com/radio.mp3"
+OK
+[pure binary MP3 data flows continuously to UART]
+
+Stop Success:
+AT+BNWEBRADIO_STOP
++BNWEBRADIO_STOP:
+OK
+
+Start Error:
+AT+BNWEBRADIO="http://invalid.url/"
+ERROR
+
+Stop Error (no active stream):
+AT+BNWEBRADIO_STOP
++BNWEBRADIO_STOP:
+ERROR
+```
+
+### 21.17 Integration with Other Commands
+- Set timeout before streaming: `AT+BNCURL_TIMEOUT="30"`, then `AT+BNWEBRADIO="..."`
+- WPS connection setup, then immediate streaming
+- Certificate loading for HTTPS streams
+- SD card operations before/after streaming
+
+### 21.18 Resource Management Tests
+- Memory usage during streaming
+- Connection pool management
+- Cleanup after stream termination
+- Recovery from stream errors
+
+### 21.19 Protocol Comparison Tests
+**Standard BNCURL Output (with protocol overhead):**
+```
+AT+BNCURL="GET","http://example.com/audio.mp3"
++LEN:"1048576",
++POST:"512",[512 bytes with protocol]
++POST:"512",[512 bytes with protocol]
+... (continues with protocol overhead)
+SEND OK
+```
+
+**Web Radio Output (pure binary):**
+```
+AT+BNWEBRADIO="http://stream.example.com/radio.mp3"
+OK
+[raw MP3 bytes flow directly - no +LEN:, no +POST:, no SEND OK]
+```
+
+### 21.20 Stream Quality Validation
+- Compare output with direct stream access
+- Verify no data corruption in binary stream
+- Test with audio analysis tools
+- Validate MP3/AAC frame integrity
+
+## 22. Multi-Protocol Streaming Tests
+
+### 22.1 Different Streaming Protocols
+- Icecast streams
+- Shoutcast streams
+- HLS streams (if supported)
+- Direct file streaming vs. live streaming
+
+### 22.2 Stream Format Detection
+- Auto-detection of MP3 vs AAC vs other formats
+- Handling of unsupported formats
+- Content-Type header analysis
+- Magic byte detection in stream
+
+### Notes:
+- Use reliable test endpoints (httpbin.org recommended)
+- Ensure SD card has various test files and adequate free space
+- Monitor ESP32 memory usage during stress tests
+- Verify TLS certificate validation with known test certificates
+- Test both IPv4 and IPv6 connectivity if available
+- **Critical**: Verify pure binary output for web radio (no protocol overhead)
+- **Critical**: Test audio decoder compatibility with streamed output
+
