@@ -372,6 +372,9 @@ typedef struct {
     /* Custom headers */
     struct curl_slist *headers;  /* curl header list */
     
+    /* Verbose mode */
+    bool verbose;                /* whether to enable verbose output */
+    
     SemaphoreHandle_t done;
     uint8_t result_code;
 } bncurl_req_t;
@@ -540,6 +543,103 @@ static size_t bncurl_read_callback(void *buffer, size_t size, size_t nitems, voi
         
         return to_copy;
     }
+}
+
+/* ================= Verbose debug callback ================= */
+static int bncurl_debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, void *userdata) {
+    (void)handle; /* Unused */
+    bncurl_req_t *req = (bncurl_req_t*)userdata;
+    
+    if (!req->verbose) {
+        return 0; /* Not in verbose mode */
+    }
+    
+    const char *prefix = "";
+    switch (type) {
+        case CURLINFO_TEXT:
+            prefix = "+VERB: * ";
+            break;
+        case CURLINFO_HEADER_IN:
+            prefix = "+VERB: < ";
+            break;
+        case CURLINFO_HEADER_OUT:
+            prefix = "+VERB: > ";
+            break;
+        case CURLINFO_DATA_IN:
+            prefix = "+VERB: << ";
+            break;
+        case CURLINFO_DATA_OUT:
+            prefix = "+VERB: >> ";
+            break;
+        case CURLINFO_SSL_DATA_IN:
+            prefix = "+VERB: <TLS ";
+            break;
+        case CURLINFO_SSL_DATA_OUT:
+            prefix = "+VERB: >TLS ";
+            break;
+        default:
+            return 0; /* Ignore other types */
+    }
+    
+    /* Split data into lines and add prefix to each */
+    size_t start = 0;
+    for (size_t i = 0; i < size; i++) {
+        if (data[i] == '\n') {
+            /* Found end of line */
+            size_t line_len = i - start;
+            
+            /* Remove trailing \r if present */
+            if (line_len > 0 && data[start + line_len - 1] == '\r') {
+                line_len--;
+            }
+            
+            if (line_len > 0) {
+                char output_line[512];
+                int prefix_len = snprintf(output_line, sizeof(output_line), "%s", prefix);
+                
+                /* Copy line data, ensuring it fits */
+                size_t available = sizeof(output_line) - prefix_len - 3; /* 3 for \r\n\0 */
+                size_t copy_len = (line_len < available) ? line_len : available;
+                
+                memcpy(output_line + prefix_len, data + start, copy_len);
+                output_line[prefix_len + copy_len] = '\r';
+                output_line[prefix_len + copy_len + 1] = '\n';
+                output_line[prefix_len + copy_len + 2] = '\0';
+                
+                at_uart_write_locked((const uint8_t*)output_line, prefix_len + copy_len + 2);
+            }
+            
+            start = i + 1;
+        }
+    }
+    
+    /* Handle last line if no newline at end */
+    if (start < size) {
+        size_t line_len = size - start;
+        
+        /* Remove trailing \r if present */
+        if (line_len > 0 && data[start + line_len - 1] == '\r') {
+            line_len--;
+        }
+        
+        if (line_len > 0) {
+            char output_line[512];
+            int prefix_len = snprintf(output_line, sizeof(output_line), "%s", prefix);
+            
+            /* Copy line data, ensuring it fits */
+            size_t available = sizeof(output_line) - prefix_len - 3; /* 3 for \r\n\0 */
+            size_t copy_len = (line_len < available) ? line_len : available;
+            
+            memcpy(output_line + prefix_len, data + start, copy_len);
+            output_line[prefix_len + copy_len] = '\r';
+            output_line[prefix_len + copy_len + 1] = '\n';
+            output_line[prefix_len + copy_len + 2] = '\0';
+            
+            at_uart_write_locked((const uint8_t*)output_line, prefix_len + copy_len + 2);
+        }
+    }
+    
+    return 0;
 }
 
 static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
@@ -806,6 +906,17 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
 #endif
 #endif
 
+    /* Enable verbose mode if requested */
+    if (req->verbose) {
+        curl_easy_setopt(h, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(h, CURLOPT_DEBUGFUNCTION, bncurl_debug_callback);
+        curl_easy_setopt(h, CURLOPT_DEBUGDATA, req);
+        
+        /* Debug: confirm verbose mode is active */
+        const char *verbose_msg = "+BNCURL: Verbose mode active - detailed output will follow\r\n";
+        at_uart_write_locked((const uint8_t*)verbose_msg, strlen(verbose_msg));
+    }
+
     /* Headers & body handling for spec framing */
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "identity"); /* avoid gzip changing lengths */
     
@@ -926,9 +1037,11 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  -du <size>       Upload <size> bytes from UART for POST requests\r\n"
         "  -du <filepath>   Upload file content for POST requests (@ prefix optional)\r\n"
         "  -H <header>      Add custom HTTP header (up to 10 headers)\r\n"
+        "  -v               Enable verbose mode (show detailed HTTP transaction)\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
         "  AT+BNCURL=HEAD,\"http://httpbin.org/get\"      Print headers to UART (HTTP)\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-v    Verbose GET request\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\"  Upload 8 bytes from UART\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"/Upload/data.bin\"  Upload file\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\",-H,\"Content-Type: text/plain\"  POST with header\r\n"
@@ -939,6 +1052,7 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "Note: Try HTTP first if HTTPS has TLS issues\r\n"
         "Note: HEAD method prints headers with +HDR: prefix\r\n"
         "Note: POST with -du prompts with > for UART input\r\n"
+        "Note: Verbose mode shows connection details with +VERB: prefix\r\n"
         "Note: Directories are created automatically if they don't exist\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
@@ -978,13 +1092,14 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Parse optional arguments. Now -dd (file save), -du (data upload), and -H (headers) are implemented. */
+    /* Parse optional arguments. Now -dd (file save), -du (data upload), -H (headers), and -v (verbose) are implemented. */
     bool want_file = false;
     char file_path_tmp[128] = {0};
     bool want_upload = false;
     char upload_param[128] = {0};
     bool upload_from_file = false;
     size_t upload_size = 0;
+    bool want_verbose = false;
     
     /* Custom headers storage */
     #define MAX_HEADERS 10
@@ -992,7 +1107,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     int header_count = 0;
     
     /* Parse all parameters starting from parameter 2 */
-    for (int i = 2; i < para_num - 1; i++) {
+    for (int i = 2; i < para_num; i++) {
         uint8_t *opt = NULL;
         esp_at_para_parse_result_type result = esp_at_get_para_as_str(i, &opt);
         
@@ -1075,6 +1190,13 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                     at_uart_write_locked((const uint8_t*)e, strlen(e));
                     return ESP_AT_RESULT_CODE_ERROR;
                 }
+            } else if (strcasecmp((const char*)opt, "-v") == 0) {
+                /* Found -v flag for verbose mode */
+                want_verbose = true;
+                
+                char debug_msg[64];
+                int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG verbose mode enabled\r\n");
+                at_uart_write_locked((const uint8_t*)debug_msg, n);
             }
         }
     }
@@ -1091,6 +1213,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     req->method = method;
     strncpy(req->url, (const char*)url, sizeof(req->url)-1);
     req->save_to_file = want_file;
+    req->verbose = want_verbose;
     if (want_file) {
         strncpy(req->save_path, file_path_tmp, sizeof(req->save_path)-1);
     }
