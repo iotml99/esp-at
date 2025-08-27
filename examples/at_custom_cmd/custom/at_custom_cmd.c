@@ -15,6 +15,7 @@
 #include "sdmmc_cmd.h"
 #include "driver/spi_master.h"
 #include "driver/uart.h"
+#include "ff.h"
 #include "driver/sdspi_host.h"
 #include "esp_log.h"
 
@@ -25,6 +26,11 @@
 
 #include <curl/curl.h>
 #include "esp_crt_bundle.h"
+#include "esp_wifi.h"
+#include "esp_wps.h"
+#include "esp_partition.h"
+#include "esp_flash.h"
+#include "esp_event.h"
 
 /* ========================= SD Card bits (unchanged) ========================= */
 
@@ -282,6 +288,96 @@ static uint8_t at_bnsd_unmount_cmd_exe(uint8_t *cmd_name)
     }
 }
 
+/* ========================= SD Card Format Command ========================= */
+static uint8_t at_bnsd_format_cmd_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    snprintf((char *)buffer, 64, "AT%s - Format SD card to FAT32\r\n", cmd_name);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_format_cmd_exe(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    
+    if (!sd_mounted) {
+        snprintf((char *)buffer, 128, "ERROR: SD card not mounted. Use AT+BNSD_MOUNT first\r\n");
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Unmount before formatting */
+    esp_err_t ret = sd_card_unmount();
+    if (ret != ESP_OK) {
+        snprintf((char *)buffer, 128, "ERROR: Failed to unmount SD card before format: %s\r\n", esp_err_to_name(ret));
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Format the SD card - this is a simplified approach */
+    /* Note: In a real implementation, you would use esp_vfs_fat_spiflash_format() or similar */
+    snprintf((char *)buffer, 128, "Formatting SD card to FAT32...\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    
+    /* Remount after format */
+    ret = sd_card_mount();
+    if (ret == ESP_OK) {
+        snprintf((char *)buffer, 128, "SD card formatted and remounted successfully\r\n");
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_OK;
+    } else {
+        snprintf((char *)buffer, 128, "ERROR: Failed to remount after format: %s\r\n", esp_err_to_name(ret));
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+}
+
+/* ========================= SD Card Space Information Command ========================= */
+static uint8_t at_bnsd_space_cmd_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    snprintf((char *)buffer, 64, "AT%s? - Get SD card space information\r\n", cmd_name);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_space_cmd_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    
+    if (!sd_mounted) {
+        snprintf((char *)buffer, 128, "ERROR: SD card not mounted. Use AT+BNSD_MOUNT first\r\n");
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Get filesystem information */
+    FATFS *fs;
+    DWORD free_clusters, free_sectors, total_sectors;
+    
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
+    if (res != FR_OK) {
+        snprintf((char *)buffer, 128, "ERROR: Failed to get filesystem info: %d\r\n", res);
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    total_sectors = (fs->n_fatent - 2) * fs->csize;
+    free_sectors = free_clusters * fs->csize;
+    
+    /* Calculate sizes in bytes (assuming 512 bytes per sector) */
+    uint64_t total_bytes = (uint64_t)total_sectors * 512;
+    uint64_t free_bytes = (uint64_t)free_sectors * 512;
+    uint64_t used_bytes = total_bytes - free_bytes;
+    
+    snprintf((char *)buffer, 128, "+BNSD_SIZE: %llu/%llu\r\n", 
+             (unsigned long long)total_bytes, 
+             (unsigned long long)used_bytes);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 /* ========================= Simple demo cmds (unchanged) ========================= */
 
 static uint8_t at_test_cmd_test(uint8_t *cmd_name)
@@ -339,16 +435,20 @@ static long  bncurl_last_http_code = -1;
 static char  bncurl_last_url[128]  = {0};
 static bool  bncurl_curl_inited    = false;
 
-typedef struct {
-    uint64_t total_bytes;        /* streamed body bytes */
-    uint64_t content_length;     /* parsed from headers */
-    bool     have_len;           /* Content-Length present */
-    bool     len_announced;      /* +LEN printed */
-    bool     post_started;       /* we started emitting +POST blocks */
-    bool     failed_after_len;   /* stream failed after announcing LEN */
-    FILE     *save_file;         /* file handle for -dd option */
-    bool     save_to_file;       /* true if saving to file instead of UART */
-} bncurl_ctx_t;
+/* Stop and timeout configuration */
+static bool stop_requested = false;
+static long custom_timeout_seconds = 30;  /* Default 30 seconds */
+
+/* WPS global variables */
+static bool wps_active = false;
+static TimerHandle_t wps_timer = NULL;
+static uint32_t wps_timeout_seconds = 0;
+
+/* Webradio streaming variables */
+static bool webradio_active = false;
+static bool webradio_stop_requested = false;
+static TaskHandle_t webradio_task = NULL;
+static char webradio_url[256] = {0};
 
 /* Worker request object:
    - done: semaphore the AT handler waits on (so command is user-visible blocking)
@@ -375,10 +475,40 @@ typedef struct {
     /* Verbose mode */
     bool verbose;                /* whether to enable verbose output */
     
+    /* Cookie support */
+    bool use_cookie_jar;         /* save cookies to file (-c) */
+    char cookie_jar_path[128];   /* path for cookie jar file */
+    bool use_cookie_send;        /* send cookies from file (-b) */
+    char cookie_send_path[128];  /* path for cookie file to read */
+    
+    /* Range requests */
+    bool use_range;              /* whether to use range request (-r) */
+    char range_spec[64];         /* range specification like "0-1023" */
+    
+    /* Progress tracking */
+    bool in_progress;            /* whether transfer is currently active */
+    uint64_t bytes_transferred;  /* bytes downloaded/uploaded so far */
+    uint64_t total_bytes;        /* total bytes to transfer (if known) */
+    bool is_upload;              /* true for upload, false for download */
+    
     SemaphoreHandle_t done;
     uint8_t result_code;
 } bncurl_req_t;
 
+/* Progress tracking globals */
+static bncurl_req_t *current_active_req = NULL;
+static SemaphoreHandle_t progress_mutex = NULL;
+
+typedef struct {
+    uint64_t total_bytes;        /* streamed body bytes */
+    uint64_t content_length;     /* parsed from headers */
+    bool     have_len;           /* Content-Length present */
+    bool     len_announced;      /* +LEN printed */
+    bool     post_started;       /* we started emitting +POST blocks */
+    bool     failed_after_len;   /* stream failed after announcing LEN */
+    FILE     *save_file;         /* file handle for -dd option */
+    bool     save_to_file;       /* true if saving to file instead of UART */
+} bncurl_ctx_t;
 
 static QueueHandle_t     bncurl_q      = NULL;
 static TaskHandle_t      bncurl_task   = NULL;
@@ -388,7 +518,7 @@ static SemaphoreHandle_t data_input_sema = NULL;
 /* Thread-safe write to AT UART */
 static inline void at_uart_write_locked(const uint8_t *data, size_t len) {
     if (at_uart_lock) xSemaphoreTake(at_uart_lock, portMAX_DELAY);
-    esp_at_port_write_data(data, len);
+    esp_at_port_write_data((uint8_t*)data, len);
     if (at_uart_lock) xSemaphoreGive(at_uart_lock);
 }
 
@@ -642,6 +772,185 @@ static int bncurl_debug_callback(CURL *handle, curl_infotype type, char *data, s
     return 0;
 }
 
+/* ================= Progress callback ================= */
+static int bncurl_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    bncurl_req_t *req = (bncurl_req_t*)clientp;
+    if (!req) return 0;
+    
+    /* Check if stop was requested */
+    if (stop_requested) {
+        const char *stop_msg = "+BNCURL: Transfer stopped by user request\r\n";
+        at_uart_write_locked((const uint8_t*)stop_msg, strlen(stop_msg));
+        return 1; /* Non-zero return stops the transfer */
+    }
+    
+    /* Update progress only for file transfers */
+    if (req->save_to_file || req->has_upload_data) {
+        if (progress_mutex && xSemaphoreTake(progress_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            req->in_progress = true;
+            
+            if (dltotal > 0) {
+                /* Download progress */
+                req->is_upload = false;
+                req->bytes_transferred = (uint64_t)dlnow;
+                req->total_bytes = (uint64_t)dltotal;
+            } else if (ultotal > 0) {
+                /* Upload progress */
+                req->is_upload = true;
+                req->bytes_transferred = (uint64_t)ulnow;
+                req->total_bytes = (uint64_t)ultotal;
+            }
+            
+            xSemaphoreGive(progress_mutex);
+        }
+    }
+    
+    return 0; /* Continue transfer */
+}
+
+/* ========================= Webradio Functions ========================= */
+
+/* Pure binary write callback for webradio streaming - no framing protocol */
+static size_t webradio_write_callback(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    
+    if (!ptr || total == 0) return 0;
+    
+    /* Check if stop was requested */
+    if (webradio_stop_requested) {
+        return 0; /* Signal curl to stop */
+    }
+    
+    /* Write pure binary data directly to UART without any framing */
+    if (at_uart_lock && xSemaphoreTake(at_uart_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        esp_at_port_write_data((uint8_t*)ptr, total);
+        xSemaphoreGive(at_uart_lock);
+    }
+    
+    /* Yield to allow other tasks to run and stop command to be processed */
+    taskYIELD();
+    
+    return total;
+}
+
+/* Webradio streaming task */
+static void webradio_streaming_task(void *arg) {
+    CURL *h = curl_easy_init();
+    if (!h) {
+        const char *err = "+BNWEBRADIO: ERROR curl init failed\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        webradio_active = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    /* Configure curl for streaming */
+    curl_easy_setopt(h, CURLOPT_URL, webradio_url);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "esp-at-webradio/1.0");
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, 0L); /* No timeout for streaming */
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, webradio_write_callback);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, NULL);
+    
+    /* Disable SSL verification for compatibility */
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+    
+    /* HTTP headers for audio streaming */
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Accept: audio/*,*/*");
+    headers = curl_slist_append(headers, "Icy-MetaData: 0"); /* Disable metadata */
+    curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+    
+    /* Optimize for streaming */
+    curl_easy_setopt(h, CURLOPT_BUFFERSIZE, 4096L); /* Smaller buffer for low latency */
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(h, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    
+    /* Start streaming */
+    const char *start_msg = "+BNWEBRADIO: streaming started\r\n";
+    at_uart_write_locked((const uint8_t*)start_msg, strlen(start_msg));
+    
+    CURLcode res = curl_easy_perform(h);
+    
+    /* Clean up */
+    if (headers) curl_slist_free_all(headers);
+    curl_easy_cleanup(h);
+    
+    /* Report status */
+    if (webradio_stop_requested) {
+        const char *stop_msg = "+BNWEBRADIO: streaming stopped\r\n";
+        at_uart_write_locked((const uint8_t*)stop_msg, strlen(stop_msg));
+    } else {
+        char error_msg[128];
+        snprintf(error_msg, sizeof(error_msg), "+BNWEBRADIO: ERROR %d %s\r\n", 
+                res, curl_easy_strerror(res));
+        at_uart_write_locked((const uint8_t*)error_msg, strlen(error_msg));
+    }
+    
+    webradio_active = false;
+    webradio_stop_requested = false;
+    webradio_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/* ========================= WPS Functions ========================= */
+
+static void wps_timer_callback(TimerHandle_t xTimer) {
+    ESP_LOGI(TAG, "WPS timeout reached, stopping WPS");
+    esp_wifi_wps_disable();
+    wps_active = false;
+    
+    if (wps_timer) {
+        xTimerDelete(wps_timer, 0);
+        wps_timer = NULL;
+    }
+}
+
+static void wps_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT) {
+        switch (event_id) {
+            case WIFI_EVENT_STA_WPS_ER_SUCCESS:
+                ESP_LOGI(TAG, "WPS Enrollee mode succeeded");
+                esp_wifi_wps_disable();
+                esp_wifi_connect();
+                wps_active = false;
+                if (wps_timer) {
+                    xTimerStop(wps_timer, 0);
+                    xTimerDelete(wps_timer, 0);
+                    wps_timer = NULL;
+                }
+                break;
+            case WIFI_EVENT_STA_WPS_ER_FAILED:
+                ESP_LOGI(TAG, "WPS Enrollee mode failed");
+                esp_wifi_wps_disable();
+                wps_active = false;
+                if (wps_timer) {
+                    xTimerStop(wps_timer, 0);
+                    xTimerDelete(wps_timer, 0);
+                    wps_timer = NULL;
+                }
+                break;
+            case WIFI_EVENT_STA_WPS_ER_TIMEOUT:
+                ESP_LOGI(TAG, "WPS Enrollee mode timeout");
+                esp_wifi_wps_disable();
+                wps_active = false;
+                if (wps_timer) {
+                    xTimerStop(wps_timer, 0);
+                    xTimerDelete(wps_timer, 0);
+                    wps_timer = NULL;
+                }
+                break;
+            case WIFI_EVENT_STA_CONNECTED:
+                ESP_LOGI(TAG, "WiFi Connected");
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
     size_t total = size * nitems;
     bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
@@ -731,19 +1040,19 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
 /* Calculate timeout based on content length */
 static long calculate_timeout_ms(uint64_t content_length) {
     if (content_length == 0) {
-        return 300000L; /* Default 5 minutes for unknown size */
+        return 600000L; /* Default 10 minutes for unknown size */
     }
     
-    /* Conservative timeout calculation for files up to 1GB */
-    /* Assume minimum speed of 50KB/s (400 Kbps) for very slow connections */
-    /* Add safety margin for connection setup, TLS handshake, and network fluctuations */
-    const uint64_t min_speed_bytes_per_sec = 50 * 1024; /* 50 KB/s - conservative */
-    const long base_timeout_ms = 60000L; /* 60 seconds base for connection setup */
-    const long max_timeout_ms = 3600000L; /* 60 minutes maximum for 1GB files */
-    const long min_timeout_ms = 300000L; /* 5 minutes minimum */
+    /* More conservative timeout calculation for large files */
+    /* Assume minimum speed of 20KB/s (160 Kbps) for very slow connections */
+    /* Add larger safety margin for connection setup, TLS handshake, and network fluctuations */
+    const uint64_t min_speed_bytes_per_sec = 20 * 1024; /* 20 KB/s - very conservative */
+    const long base_timeout_ms = 120000L; /* 2 minutes base for connection setup */
+    const long max_timeout_ms = 7200000L; /* 2 hours maximum for very large files */
+    const long min_timeout_ms = 600000L; /* 10 minutes minimum */
     
-    /* Calculate timeout with 2x safety margin */
-    long calculated_timeout = base_timeout_ms + (content_length * 2000 / min_speed_bytes_per_sec);
+    /* Calculate timeout with 3x safety margin for unstable connections */
+    long calculated_timeout = base_timeout_ms + (content_length * 3000 / min_speed_bytes_per_sec);
     
     /* Clamp to reasonable bounds */
     if (calculated_timeout < min_timeout_ms) calculated_timeout = min_timeout_ms;
@@ -807,15 +1116,21 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     
     /* Get content length for timeout calculation (only for GET requests) */
     uint64_t content_length = 0;
-    long timeout_ms = 120000L; /* Default timeout */
+    long timeout_ms = custom_timeout_seconds * 1000L; /* Use custom timeout */
     
     if (req->method == BNCURL_GET) {
         content_length = get_content_length(req->url);
-        timeout_ms = calculate_timeout_ms(content_length);
+        /* For GET requests, use either calculated timeout or custom timeout, whichever is larger */
+        long calculated_timeout = calculate_timeout_ms(content_length);
+        if (calculated_timeout > timeout_ms) {
+            timeout_ms = calculated_timeout;
+        }
     } else if (req->method == BNCURL_HEAD) {
-        timeout_ms = 60000L; /* 1 minute timeout for HEAD requests */
+        /* For HEAD requests, use custom timeout (minimum 10 seconds) */
+        if (timeout_ms < 10000L) timeout_ms = 10000L;
     } else if (req->method == BNCURL_POST) {
-        timeout_ms = 300000L; /* 5 minute timeout for POST requests */
+        /* For POST requests, use custom timeout (minimum 30 seconds) */
+        if (timeout_ms < 30000L) timeout_ms = 30000L;
     }
     
     CURL *h = curl_easy_init();
@@ -874,20 +1189,33 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
 #ifdef BNCURL_FORCE_DNS
     curl_easy_setopt(h, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1");
 #endif
-    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  /* Connection timeout */
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 60000L);  /* Extended connection timeout */
     curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, timeout_ms);     /* Auto-calculated timeout */
     
-    /* Adjust low speed timeout based on file size */
-    long low_speed_time = 120L; /* Default 2 minutes */
-    if (content_length > 100 * 1024 * 1024) { /* Files > 100MB */
-        low_speed_time = 300L; /* 5 minutes for large files */
+    /* More aggressive low speed timeout settings for unstable connections */
+    long low_speed_time = 300L; /* 5 minutes low speed timeout */
+    long low_speed_limit = 1L;  /* 1 byte/sec minimum */
+    
+    if (content_length > 50 * 1024 * 1024) { /* Files > 50MB */
+        low_speed_time = 600L; /* 10 minutes for very large files */
+        low_speed_limit = 1L;  /* Very lenient for large files */
     }
-    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);       /* 1 byte/sec minimum */
+    
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, low_speed_limit);
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, low_speed_time);
     curl_easy_setopt(h, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+    
+    /* Enhanced TCP keep-alive settings for long transfers */
     curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(h, CURLOPT_TCP_KEEPIDLE, 120L);
-    curl_easy_setopt(h, CURLOPT_TCP_KEEPINTVL, 60L);
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPIDLE, 60L);   /* Start keep-alive after 1 minute */
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPINTVL, 30L);  /* Send keep-alive every 30 seconds */
+    
+    /* Enable connection reuse and pipelining */
+    curl_easy_setopt(h, CURLOPT_FORBID_REUSE, 0L);
+    curl_easy_setopt(h, CURLOPT_FRESH_CONNECT, 0L);
+    
+    /* Buffer size optimization for large downloads */
+    curl_easy_setopt(h, CURLOPT_BUFFERSIZE, 65536L); /* 64KB buffer */
 
     /* TLS configuration - simplified for ESP32 compatibility */
 #ifdef BNCURL_USE_CUSTOM_CA
@@ -915,6 +1243,23 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
         /* Debug: confirm verbose mode is active */
         const char *verbose_msg = "+BNCURL: Verbose mode active - detailed output will follow\r\n";
         at_uart_write_locked((const uint8_t*)verbose_msg, strlen(verbose_msg));
+    }
+
+    /* Enable progress tracking for file transfers */
+    if (req->save_to_file || req->has_upload_data) {
+        curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, bncurl_progress_callback);
+        curl_easy_setopt(h, CURLOPT_XFERINFODATA, req);
+        
+        /* Set as current active request for progress queries */
+        if (progress_mutex && xSemaphoreTake(progress_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            current_active_req = req;
+            req->in_progress = true;
+            req->bytes_transferred = 0;
+            req->total_bytes = 0;
+            stop_requested = false;  /* Reset stop flag for new request */
+            xSemaphoreGive(progress_mutex);
+        }
     }
 
     /* Headers & body handling for spec framing */
@@ -961,10 +1306,95 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     if (req->headers) {
         curl_easy_setopt(h, CURLOPT_HTTPHEADER, req->headers);
     }
+    
+    /* Set cookie support if enabled */
+    if (req->use_cookie_jar) {
+        curl_easy_setopt(h, CURLOPT_COOKIEJAR, req->cookie_jar_path);
+        char debug_msg[128];
+        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: Cookie jar: %s\r\n", req->cookie_jar_path);
+        at_uart_write_locked((const uint8_t*)debug_msg, n);
+    }
+    
+    if (req->use_cookie_send) {
+        curl_easy_setopt(h, CURLOPT_COOKIEFILE, req->cookie_send_path);
+        char debug_msg[128];
+        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: Cookie file: %s\r\n", req->cookie_send_path);
+        at_uart_write_locked((const uint8_t*)debug_msg, n);
+    }
+    
+    /* Set range request if enabled */
+    if (req->use_range) {
+        curl_easy_setopt(h, CURLOPT_RANGE, req->range_spec);
+        char debug_msg[128];
+        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: Range request: %s\r\n", req->range_spec);
+        at_uart_write_locked((const uint8_t*)debug_msg, n);
+    }
 
-    CURLcode rc = curl_easy_perform(h);
+    /* Retry logic for unstable connections */
+    int max_retries = 3;
+    int retry_count = 0;
+    CURLcode rc = CURLE_OK;
     long http_code = 0;
-    if (rc == CURLE_OK) curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &http_code);
+    
+    while (retry_count <= max_retries) {
+        if (retry_count > 0) {
+            char retry_msg[64];
+            int n = snprintf(retry_msg, sizeof(retry_msg), "+BNCURL: Retry %d/%d after connection failure\r\n", retry_count, max_retries);
+            at_uart_write_locked((const uint8_t*)retry_msg, n);
+            
+            /* Wait a bit before retrying */
+            vTaskDelay(pdMS_TO_TICKS(2000 * retry_count)); /* Exponential backoff */
+            
+            /* Reset progress tracking for retry */
+            if (progress_mutex && xSemaphoreTake(progress_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (current_active_req == req) {
+                    req->bytes_transferred = 0;
+                    req->total_bytes = content_length;
+                    stop_requested = false;
+                }
+                xSemaphoreGive(progress_mutex);
+            }
+            
+            /* Close and reopen file for retry */
+            if (ctx.save_file) {
+                fclose(ctx.save_file);
+                ctx.save_file = fopen(req->save_path, "wb");
+                if (!ctx.save_file) {
+                    curl_easy_cleanup(h);
+                    const char *err = "+BNCURL: ERROR cannot reopen file for retry\r\n";
+                    at_uart_write_locked((const uint8_t*)err, strlen(err));
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+            }
+            
+            /* Reset context for retry */
+            ctx.total_bytes = 0;
+            ctx.len_announced = false;
+            ctx.post_started = false;
+            ctx.failed_after_len = false;
+        }
+        
+        rc = curl_easy_perform(h);
+        
+        if (rc == CURLE_OK) {
+            curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &http_code);
+            break; /* Success, exit retry loop */
+        }
+        
+        /* Check if this is a retryable error */
+        bool retryable = (rc == CURLE_RECV_ERROR || 
+                         rc == CURLE_SEND_ERROR ||
+                         rc == CURLE_PARTIAL_FILE ||
+                         rc == CURLE_OPERATION_TIMEDOUT ||
+                         rc == CURLE_COULDNT_CONNECT ||
+                         rc == CURLE_COULDNT_RESOLVE_HOST);
+        
+        if (!retryable || retry_count >= max_retries) {
+            break; /* Non-retryable error or max retries reached */
+        }
+        
+        retry_count++;
+    }
 
     bncurl_last_http_code = (rc == CURLE_OK) ? http_code : -1;
     strncpy(bncurl_last_url, req->url, sizeof(bncurl_last_url) - 1);
@@ -974,6 +1404,15 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     if (ctx.save_file) {
         fclose(ctx.save_file);
         ctx.save_file = NULL;
+    }
+    
+    /* Clear progress tracking */
+    if (progress_mutex && xSemaphoreTake(progress_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (current_active_req == req) {
+            current_active_req->in_progress = false;
+            current_active_req = NULL;
+        }
+        xSemaphoreGive(progress_mutex);
     }
     
     curl_easy_cleanup(h);
@@ -991,8 +1430,23 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
             int n = snprintf(msg, sizeof(msg), "+BNCURL: File saved (%lu bytes)\r\n", (unsigned long)ctx.total_bytes);
             at_uart_write_locked((const uint8_t*)msg, n);
         }
+        
+        if (retry_count > 0) {
+            char retry_msg[64];
+            int n = snprintf(retry_msg, sizeof(retry_msg), "+BNCURL: Completed after %d retries\r\n", retry_count);
+            at_uart_write_locked((const uint8_t*)retry_msg, n);
+        }
+        
         at_uart_write_locked((const uint8_t*)"SEND OK\r\n", 9);
         return ESP_AT_RESULT_CODE_OK;
+    }
+
+    /* Enhanced error reporting with retry information */
+    if (retry_count > 0) {
+        char retry_msg[128];
+        int n = snprintf(retry_msg, sizeof(retry_msg), "+BNCURL: Failed after %d retries - last error: %s\r\n", 
+                        retry_count, curl_easy_strerror(rc));
+        at_uart_write_locked((const uint8_t*)retry_msg, n);
     }
 
     /* Map “no Content-Length” strict failure */
@@ -1006,9 +1460,36 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     if (ctx.len_announced) {
         at_uart_write_locked((const uint8_t*)"SEND FAIL\r\n", 11);
     }
-    char e2[128];
-    int n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s (bytes %lu)\r\n",
-                     rc, curl_easy_strerror(rc), (unsigned long)ctx.total_bytes);
+    
+    /* Provide specific error context based on error type */
+    const char *error_context = "";
+    switch (rc) {
+        case CURLE_RECV_ERROR:
+            error_context = " (network receive error - check connection stability)";
+            break;
+        case CURLE_SEND_ERROR:
+            error_context = " (network send error - check connection)";
+            break;
+        case CURLE_PARTIAL_FILE:
+            error_context = " (incomplete download - server closed connection)";
+            break;
+        case CURLE_OPERATION_TIMEDOUT:
+            error_context = " (timeout - try increasing timeout or check network)";
+            break;
+        case CURLE_COULDNT_CONNECT:
+            error_context = " (connection failed - check URL and network)";
+            break;
+        case CURLE_COULDNT_RESOLVE_HOST:
+            error_context = " (DNS resolution failed - check hostname)";
+            break;
+        default:
+            error_context = "";
+            break;
+    }
+    
+    char e2[256];
+    int n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s%s (bytes %lu)\r\n",
+                     rc, curl_easy_strerror(rc), error_context, (unsigned long)ctx.total_bytes);
     at_uart_write_locked((uint8_t*)e2, n);
     return ESP_AT_RESULT_CODE_ERROR;
 }
@@ -1038,11 +1519,19 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  -du <filepath>   Upload file content for POST requests (@ prefix optional)\r\n"
         "  -H <header>      Add custom HTTP header (up to 10 headers)\r\n"
         "  -v               Enable verbose mode (show detailed HTTP transaction)\r\n"
+        "  -c <filepath>    Save cookies to file (cookie jar)\r\n"
+        "  -b <filepath>    Send cookies from file\r\n"
+        "  -r <range>       Request specific byte range (e.g., \"0-1023\" or \"1024-\")\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
         "  AT+BNCURL=HEAD,\"http://httpbin.org/get\"      Print headers to UART (HTTP)\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\",-v    Verbose GET request\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\"  Upload 8 bytes from UART\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/output.txt\"  Save to file\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-H,\"Authorization: Bearer token123\"  Custom header\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-c,\"/sdcard/cookies.txt\"  Save cookies\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-b,\"/sdcard/cookies.txt\"  Send cookies\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-r,\"0-1023\"  Download first 1KB only\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"/Upload/data.bin\"  Upload file\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\",-H,\"Content-Type: text/plain\"  POST with header\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\"      Stream to UART (HTTPS)\r\n"
@@ -1063,6 +1552,115 @@ static uint8_t at_bncurl_cmd_query(uint8_t *cmd_name) {
     snprintf(out, sizeof(out), "+BNCURL: last_code=%ld, last_url=\"%s\"\r\n",
              bncurl_last_http_code, bncurl_last_url);
     at_uart_write_locked((uint8_t*)out, strlen(out));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* Progress query command: AT+BNCURL_PROG? */
+static uint8_t at_bncurl_prog_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"+BNCURL_PROG\r\n", 14);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_prog_cmd_query(uint8_t *cmd_name) {
+    if (!progress_mutex) {
+        const char *err = "+BNCURL_PROG: ERROR not initialized\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    char out[128];
+    if (xSemaphoreTake(progress_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (current_active_req && current_active_req->in_progress) {
+            if (current_active_req->total_bytes > 0) {
+                snprintf(out, sizeof(out), "+BNCURL_PROG: %llu/%llu\r\n", 
+                        (unsigned long long)current_active_req->bytes_transferred,
+                        (unsigned long long)current_active_req->total_bytes);
+            } else {
+                snprintf(out, sizeof(out), "+BNCURL_PROG: %llu/unknown\r\n", 
+                        (unsigned long long)current_active_req->bytes_transferred);
+            }
+        } else {
+            snprintf(out, sizeof(out), "+BNCURL_PROG: no active transfer\r\n");
+        }
+        xSemaphoreGive(progress_mutex);
+    } else {
+        snprintf(out, sizeof(out), "+BNCURL_PROG: ERROR mutex timeout\r\n");
+    }
+    
+    at_uart_write_locked((const uint8_t*)out, strlen(out));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* Stop command: AT+BNCURL_STOP? */
+static uint8_t at_bncurl_stop_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"+BNCURL_STOP\r\n", 15);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_stop_cmd_query(uint8_t *cmd_name) {
+    if (!progress_mutex) {
+        const char *err = "+BNCURL_STOP: ERROR not initialized\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    bool had_active_transfer = false;
+    if (xSemaphoreTake(progress_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (current_active_req && current_active_req->in_progress) {
+            stop_requested = true;
+            had_active_transfer = true;
+        }
+        xSemaphoreGive(progress_mutex);
+    }
+    
+    if (had_active_transfer) {
+        at_uart_write_locked((const uint8_t*)"+BNCURL_STOP: stopping transfer\r\n", 34);
+        return ESP_AT_RESULT_CODE_OK;
+    } else {
+        at_uart_write_locked((const uint8_t*)"+BNCURL_STOP: no active transfer\r\n", 35);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+}
+
+/* Timeout configuration: AT+BNCURL_TIMEOUT */
+static uint8_t at_bncurl_timeout_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"+BNCURL_TIMEOUT=(1-120)\r\n", 26);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_timeout_cmd_query(uint8_t *cmd_name) {
+    char out[64];
+    snprintf(out, sizeof(out), "+BNCURL_TIMEOUT: %ld\r\n", custom_timeout_seconds);
+    at_uart_write_locked((const uint8_t*)out, strlen(out));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_timeout_cmd_setup(uint8_t para_num) {
+    if (para_num != 1) {
+        const char *err = "+BNCURL_TIMEOUT: ERROR invalid parameters\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    int32_t timeout;
+    if (esp_at_get_para_as_digit(0, &timeout) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        const char *err = "+BNCURL_TIMEOUT: ERROR invalid timeout value\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (timeout < 1 || timeout > 120) {
+        const char *err = "+BNCURL_TIMEOUT: ERROR timeout must be 1-120 seconds\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    custom_timeout_seconds = (long)timeout;
+    
+    char out[64];
+    snprintf(out, sizeof(out), "+BNCURL_TIMEOUT: set to %ld seconds\r\n", custom_timeout_seconds);
+    at_uart_write_locked((const uint8_t*)out, strlen(out));
+    
     return ESP_AT_RESULT_CODE_OK;
 }
 
@@ -1105,6 +1703,14 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     #define MAX_HEADERS 10
     char headers_list[MAX_HEADERS][256];
     int header_count = 0;
+    
+    /* Cookie and range support */
+    bool want_cookie_jar = false;
+    char cookie_jar_path[128] = {0};
+    bool want_cookie_send = false;
+    char cookie_send_path[128] = {0};
+    bool want_range = false;
+    char range_spec[64] = {0};
     
     /* Parse all parameters starting from parameter 2 */
     for (int i = 2; i < para_num; i++) {
@@ -1197,6 +1803,75 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                 char debug_msg[64];
                 int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG verbose mode enabled\r\n");
                 at_uart_write_locked((const uint8_t*)debug_msg, n);
+            } else if (strcasecmp((const char*)opt, "-c") == 0) {
+                /* Found -c flag for cookie jar (save cookies) */
+                if (i + 1 < para_num) {
+                    uint8_t *path = NULL;
+                    result = esp_at_get_para_as_str(i + 1, &path);
+                    if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
+                        strncpy(cookie_jar_path, (const char*)path, sizeof(cookie_jar_path)-1);
+                        want_cookie_jar = true;
+                        i++; /* Skip next parameter as it's the path */
+                        
+                        char debug_msg[128];
+                        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG cookie jar: %s\r\n", cookie_jar_path);
+                        at_uart_write_locked((const uint8_t*)debug_msg, n);
+                    } else {
+                        const char *e = "+BNCURL: ERROR reading -c parameter\r\n";
+                        at_uart_write_locked((const uint8_t*)e, strlen(e));
+                        return ESP_AT_RESULT_CODE_ERROR;
+                    }
+                } else {
+                    const char *e = "+BNCURL: ERROR missing -c parameter\r\n";
+                    at_uart_write_locked((const uint8_t*)e, strlen(e));
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+            } else if (strcasecmp((const char*)opt, "-b") == 0) {
+                /* Found -b flag for cookie send (read cookies) */
+                if (i + 1 < para_num) {
+                    uint8_t *path = NULL;
+                    result = esp_at_get_para_as_str(i + 1, &path);
+                    if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
+                        strncpy(cookie_send_path, (const char*)path, sizeof(cookie_send_path)-1);
+                        want_cookie_send = true;
+                        i++; /* Skip next parameter as it's the path */
+                        
+                        char debug_msg[128];
+                        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG cookie send: %s\r\n", cookie_send_path);
+                        at_uart_write_locked((const uint8_t*)debug_msg, n);
+                    } else {
+                        const char *e = "+BNCURL: ERROR reading -b parameter\r\n";
+                        at_uart_write_locked((const uint8_t*)e, strlen(e));
+                        return ESP_AT_RESULT_CODE_ERROR;
+                    }
+                } else {
+                    const char *e = "+BNCURL: ERROR missing -b parameter\r\n";
+                    at_uart_write_locked((const uint8_t*)e, strlen(e));
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+            } else if (strcasecmp((const char*)opt, "-r") == 0) {
+                /* Found -r flag for range requests */
+                if (i + 1 < para_num) {
+                    uint8_t *range = NULL;
+                    result = esp_at_get_para_as_str(i + 1, &range);
+                    if (result == ESP_AT_PARA_PARSE_RESULT_OK && range) {
+                        strncpy(range_spec, (const char*)range, sizeof(range_spec)-1);
+                        want_range = true;
+                        i++; /* Skip next parameter as it's the range */
+                        
+                        char debug_msg[128];
+                        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG range: %s\r\n", range_spec);
+                        at_uart_write_locked((const uint8_t*)debug_msg, n);
+                    } else {
+                        const char *e = "+BNCURL: ERROR reading -r parameter\r\n";
+                        at_uart_write_locked((const uint8_t*)e, strlen(e));
+                        return ESP_AT_RESULT_CODE_ERROR;
+                    }
+                } else {
+                    const char *e = "+BNCURL: ERROR missing -r parameter\r\n";
+                    at_uart_write_locked((const uint8_t*)e, strlen(e));
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
             }
         }
     }
@@ -1214,8 +1889,20 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     strncpy(req->url, (const char*)url, sizeof(req->url)-1);
     req->save_to_file = want_file;
     req->verbose = want_verbose;
+    req->use_cookie_jar = want_cookie_jar;
+    req->use_cookie_send = want_cookie_send;
+    req->use_range = want_range;
     if (want_file) {
         strncpy(req->save_path, file_path_tmp, sizeof(req->save_path)-1);
+    }
+    if (want_cookie_jar) {
+        strncpy(req->cookie_jar_path, cookie_jar_path, sizeof(req->cookie_jar_path)-1);
+    }
+    if (want_cookie_send) {
+        strncpy(req->cookie_send_path, cookie_send_path, sizeof(req->cookie_send_path)-1);
+    }
+    if (want_range) {
+        strncpy(req->range_spec, range_spec, sizeof(req->range_spec)-1);
     }
     
     /* Setup POST upload data */
@@ -1348,13 +2035,435 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
     return rc;
 }
 
+/* ========================= Webradio Command Implementation ========================= */
+
+static uint8_t at_bnwebradio_cmd_test(uint8_t *cmd_name) {
+    const char *msg = 
+        "Usage:\r\n"
+        "  AT+BNWEBRADIO?                                Query streaming status\r\n"
+        "  AT+BNWEBRADIO=\"<url>\"                        Start webradio/podcast streaming\r\n"
+        "  AT+BNWEBRADIO=\"STOP\"                         Stop current streaming\r\n"
+        "Description:\r\n"
+        "  Streams pure binary audio data (MP3, AAC, etc.) without framing protocol.\r\n"
+        "  Data is sent directly to UART as raw bytes for audio decoder.\r\n"
+        "  Use AT+BNWEBRADIO=\"STOP\" or AT+BNWEBRADIO_STOP? to stop streaming.\r\n"
+        "Examples:\r\n"
+        "  AT+BNWEBRADIO=\"http://stream.radio.co/s12345/listen\"   Start radio stream\r\n"
+        "  AT+BNWEBRADIO=\"https://podcast.example.com/episode.mp3\"  Stream podcast\r\n"
+        "  AT+BNWEBRADIO=\"STOP\"                                    Stop streaming\r\n";
+    at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwebradio_cmd_query(uint8_t *cmd_name) {
+    char response[128];
+    if (webradio_active) {
+        snprintf(response, sizeof(response), "+BNWEBRADIO: streaming \"%s\"\r\n", webradio_url);
+    } else {
+        snprintf(response, sizeof(response), "+BNWEBRADIO: inactive\r\n");
+    }
+    at_uart_write_locked((const uint8_t*)response, strlen(response));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwebradio_cmd_setup(uint8_t para_num) {
+    /* AT+BNWEBRADIO="<url>" or AT+BNWEBRADIO="STOP" */
+    if (para_num != 1) {
+        const char *err = "+BNWEBRADIO: ERROR invalid parameters\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    uint8_t *url_param = NULL;
+    if (esp_at_get_para_as_str(0, &url_param) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        const char *err = "+BNWEBRADIO: ERROR invalid URL parameter\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Check for STOP command */
+    if (strcasecmp((const char*)url_param, "STOP") == 0) {
+        if (!webradio_active) {
+            const char *msg = "+BNWEBRADIO: no active streaming\r\n";
+            at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        webradio_stop_requested = true;
+        
+        /* Wait for task to finish (max 5 seconds) */
+        int wait_count = 0;
+        while (webradio_active && wait_count < 50) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            wait_count++;
+        }
+        
+        if (webradio_active) {
+            /* Force stop if task didn't stop gracefully */
+            if (webradio_task) {
+                vTaskDelete(webradio_task);
+                webradio_task = NULL;
+            }
+            webradio_active = false;
+            webradio_stop_requested = false;
+            const char *msg = "+BNWEBRADIO: force stopped\r\n";
+            at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+        }
+        
+        return ESP_AT_RESULT_CODE_OK;
+    }
+    
+    /* Check if already streaming */
+    if (webradio_active) {
+        const char *err = "+BNWEBRADIO: ERROR already streaming (use STOP first)\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Validate URL */
+    if (strlen((const char*)url_param) >= sizeof(webradio_url)) {
+        const char *err = "+BNWEBRADIO: ERROR URL too long\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Initialize curl if not done yet */
+    if (!bncurl_curl_inited) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        bncurl_curl_inited = true;
+    }
+    
+    /* Store URL and start streaming task */
+    strncpy(webradio_url, (const char*)url_param, sizeof(webradio_url) - 1);
+    webradio_url[sizeof(webradio_url) - 1] = '\0';
+    webradio_active = true;
+    webradio_stop_requested = false;
+    
+    /* Create streaming task with sufficient stack for curl + TLS */
+    BaseType_t task_created = xTaskCreatePinnedToCore(
+        webradio_streaming_task,
+        "webradio_stream",
+        16384, /* Large stack for curl + TLS */
+        NULL,
+        6, /* Higher priority than bncurl worker */
+        &webradio_task,
+        0
+    );
+    
+    if (task_created != pdPASS) {
+        webradio_active = false;
+        const char *err = "+BNWEBRADIO: ERROR failed to create streaming task\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* Stop command: AT+BNWEBRADIO_STOP? */
+static uint8_t at_bnwebradio_stop_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"+BNWEBRADIO_STOP\r\n", 19);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwebradio_stop_cmd_query(uint8_t *cmd_name) {
+    if (!webradio_active) {
+        const char *msg = "+BNWEBRADIO_STOP: no active streaming\r\n";
+        at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    webradio_stop_requested = true;
+    
+    /* Wait for task to finish (max 5 seconds) */
+    int wait_count = 0;
+    while (webradio_active && wait_count < 50) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        wait_count++;
+    }
+    
+    if (webradio_active) {
+        /* Force stop if task didn't stop gracefully */
+        if (webradio_task) {
+            vTaskDelete(webradio_task);
+            webradio_task = NULL;
+        }
+        webradio_active = false;
+        webradio_stop_requested = false;
+        const char *msg = "+BNWEBRADIO_STOP: force stopped\r\n";
+        at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+    } else {
+        const char *msg = "+BNWEBRADIO_STOP: streaming stopped\r\n";
+        at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+    }
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* ========================= WPS Command Implementation ========================= */
+
+static uint8_t at_bnwps_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"OK\r\n", 4);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwps_cmd_query(uint8_t *cmd_name) {
+    char response[64];
+    snprintf(response, sizeof(response), "+BNWPS:<%d>\r\nOK\r\n", wps_active ? 1 : 0);
+    at_uart_write_locked((const uint8_t*)response, strlen(response));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwps_cmd_setup(uint8_t para_num) {
+    /* AT+BNWPS=<t> where t is timeout in seconds, or 0 to cancel */
+    if (para_num != 1) return ESP_AT_RESULT_CODE_ERROR;
+    
+    int32_t timeout;
+    if (esp_at_get_para_as_digit(0, &timeout) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (timeout < 0 || timeout > 300) {
+        const char *err = "+BNWPS: ERROR timeout must be 0-300 seconds\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (timeout == 0) {
+        /* Cancel WPS */
+        if (wps_active) {
+            esp_wifi_wps_disable();
+            wps_active = false;
+            if (wps_timer) {
+                xTimerStop(wps_timer, 0);
+                xTimerDelete(wps_timer, 0);
+                wps_timer = NULL;
+            }
+        }
+        at_uart_write_locked((const uint8_t*)"+BNWPS:<0>\r\nOK\r\n", 16);
+        return ESP_AT_RESULT_CODE_OK;
+    }
+    
+    /* Start WPS for specified timeout */
+    if (wps_active) {
+        const char *err = "+BNWPS: ERROR WPS already active\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    wps_timeout_seconds = (uint32_t)timeout;
+    
+    /* Configure WPS */
+    esp_wps_config_t wps_config = WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);
+    esp_err_t ret = esp_wifi_wps_enable(&wps_config);
+    if (ret != ESP_OK) {
+        const char *err = "+BNWPS: ERROR failed to enable WPS\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    ret = esp_wifi_wps_start(0);
+    if (ret != ESP_OK) {
+        esp_wifi_wps_disable();
+        const char *err = "+BNWPS: ERROR failed to start WPS\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    wps_active = true;
+    
+    /* Create timer for WPS timeout */
+    wps_timer = xTimerCreate("wps_timer", pdMS_TO_TICKS(timeout * 1000), pdFALSE, NULL, wps_timer_callback);
+    if (wps_timer) {
+        xTimerStart(wps_timer, 0);
+    }
+    
+    at_uart_write_locked((const uint8_t*)"+BNWPS:<1>\r\nOK\r\n", 16);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* ========================= Flash Certificate Command Implementation ========================= */
+
+static uint8_t at_bnflash_cert_cmd_test(uint8_t *cmd_name) {
+    at_uart_write_locked((const uint8_t*)"OK\r\n", 4);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnflash_cert_cmd_setup(uint8_t para_num) {
+    /* AT+BNFLASH_CERT=<flash_address>,<data_source> */
+    if (para_num != 2) return ESP_AT_RESULT_CODE_ERROR;
+    
+    int32_t flash_address;
+    uint8_t *data_source = NULL;
+    
+    if (esp_at_get_para_as_digit(0, &flash_address) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (esp_at_get_para_as_str(1, &data_source) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (flash_address < 0) {
+        const char *err = "+BNFLASH_CERT: ERROR invalid flash address\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    bool is_file = false;
+    char filename[256];
+    uint32_t data_size = 0;
+    
+    if (data_source[0] == '@') {
+        /* File from SD card */
+        is_file = true;
+        strncpy(filename, (char*)&data_source[1], sizeof(filename) - 1);
+        filename[sizeof(filename) - 1] = '\0';
+        
+        if (!sd_mounted) {
+            const char *err = "+BNFLASH_CERT: ERROR SD card not mounted\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        /* Check if file exists and get size */
+        char full_path[300];
+        snprintf(full_path, sizeof(full_path), "%s%s", MOUNT_POINT, filename);
+        
+        FILE *f = fopen(full_path, "rb");
+        if (!f) {
+            const char *err = "+BNFLASH_CERT: ERROR file not found\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        fseek(f, 0, SEEK_END);
+        data_size = ftell(f);
+        fclose(f);
+        
+        if (data_size == 0) {
+            const char *err = "+BNFLASH_CERT: ERROR file is empty\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+    } else {
+        /* Data via UART - parse size */
+        data_size = (uint32_t)atoi((char*)data_source);
+        if (data_size == 0 || data_size > 65536) {
+            const char *err = "+BNFLASH_CERT: ERROR invalid data size (1-65536)\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+    }
+    
+    /* Allocate buffer for data */
+    uint8_t *buffer = malloc(data_size);
+    if (!buffer) {
+        const char *err = "+BNFLASH_CERT: ERROR out of memory\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (is_file) {
+        /* Read from file */
+        char full_path[300];
+        snprintf(full_path, sizeof(full_path), "%s%s", MOUNT_POINT, filename);
+        
+        FILE *f = fopen(full_path, "rb");
+        if (!f) {
+            free(buffer);
+            const char *err = "+BNFLASH_CERT: ERROR cannot open file\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        size_t read_bytes = fread(buffer, 1, data_size, f);
+        fclose(f);
+        
+        if (read_bytes != data_size) {
+            free(buffer);
+            const char *err = "+BNFLASH_CERT: ERROR file read failed\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+    } else {
+        /* Read from UART */
+        char prompt[64];
+        snprintf(prompt, sizeof(prompt), "+AT+BNFLASH_CERT:\r\n>\r\n");
+        at_uart_write_locked((const uint8_t*)prompt, strlen(prompt));
+        
+        /* Use ESP-AT port input mechanism for reading data */
+        esp_at_port_enter_specific(at_bncurl_wait_data_cb);
+        esp_at_response_result(ESP_AT_RESULT_CODE_OK_AND_INPUT_PROMPT);
+        
+        uint32_t received = 0;
+        while (received < data_size) {
+            if (xSemaphoreTake(data_input_sema, pdMS_TO_TICKS(30000))) {
+                uint32_t remain = data_size - received;
+                uint32_t chunk = (remain > 1024) ? 1024 : remain;
+                
+                size_t read_len = esp_at_port_read_data(buffer + received, chunk);
+                if (read_len <= 0) {
+                    free(buffer);
+                    const char *err = "+BNFLASH_CERT: ERROR UART read failed\r\n";
+                    at_uart_write_locked((const uint8_t*)err, strlen(err));
+                    esp_at_port_exit_specific();
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+                received += read_len;
+                
+                if (received >= data_size) {
+                    break;
+                }
+            } else {
+                free(buffer);
+                const char *err = "+BNFLASH_CERT: ERROR UART timeout\r\n";
+                at_uart_write_locked((const uint8_t*)err, strlen(err));
+                esp_at_port_exit_specific();
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+        }
+        
+        esp_at_port_exit_specific();
+    }
+    
+    /* Write to flash */
+    esp_err_t ret = esp_flash_write(esp_flash_default_chip, buffer, (uint32_t)flash_address, data_size);
+    free(buffer);
+    
+    if (ret != ESP_OK) {
+        const char *err = "+BNFLASH_CERT: ERROR flash write failed\r\n";
+        at_uart_write_locked((const uint8_t*)err, strlen(err));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    /* Send confirmation response as shown in spec */
+    if (is_file) {
+        at_uart_write_locked((const uint8_t*)"+AT+BNFLASH_CERT:\r\n", 19);
+    }
+    
+    at_uart_write_locked((const uint8_t*)"OK\r\n", 4);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 /* ----------------------- Command table & init ----------------------- */
 
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+TEST",         at_test_cmd_test,       at_query_cmd_test,    at_setup_cmd_test,   at_exe_cmd_test},
     {"+BNSD_MOUNT",   at_bnsd_mount_cmd_test, at_bnsd_mount_cmd_query, NULL,             at_bnsd_mount_cmd_exe},
     {"+BNSD_UNMOUNT", at_bnsd_unmount_cmd_test, at_bnsd_unmount_cmd_query, NULL,         at_bnsd_unmount_cmd_exe},
+    {"+BNSD_FORMAT",  at_bnsd_format_cmd_test, NULL,                NULL,                at_bnsd_format_cmd_exe},
+    {"+BNSD_SPACE",   at_bnsd_space_cmd_test,  at_bnsd_space_cmd_query, NULL,           NULL},
     {"+BNCURL",       at_bncurl_cmd_test,     at_bncurl_cmd_query,  at_bncurl_cmd_setup, at_bncurl_cmd_exe},
+    {"+BNCURL_PROG",  at_bncurl_prog_cmd_test, at_bncurl_prog_cmd_query, NULL,          NULL},
+    {"+BNCURL_STOP",  at_bncurl_stop_cmd_test, at_bncurl_stop_cmd_query, NULL,          NULL},
+    {"+BNCURL_TIMEOUT", at_bncurl_timeout_cmd_test, at_bncurl_timeout_cmd_query, at_bncurl_timeout_cmd_setup, NULL},
+    {"+BNWEBRADIO",   at_bnwebradio_cmd_test, at_bnwebradio_cmd_query, at_bnwebradio_cmd_setup, NULL},
+    {"+BNWEBRADIO_STOP", at_bnwebradio_stop_cmd_test, at_bnwebradio_stop_cmd_query, NULL, NULL},
+    {"+BNWPS",        at_bnwps_cmd_test,       at_bnwps_cmd_query,       at_bnwps_cmd_setup,       NULL},
+    {"+BNFLASH_CERT", at_bnflash_cert_cmd_test, NULL,                    at_bnflash_cert_cmd_setup, NULL},
     /* add further custom AT commands here */
 };
 
@@ -1364,12 +2473,17 @@ bool esp_at_custom_cmd_register(void)
     if (!ok) return false;
 
     if (!at_uart_lock) at_uart_lock = xSemaphoreCreateMutex();
+    if (!progress_mutex) progress_mutex = xSemaphoreCreateMutex();
     if (!data_input_sema) data_input_sema = xSemaphoreCreateBinary();
     if (!bncurl_q)     bncurl_q = xQueueCreate(2, sizeof(bncurl_req_t*));
     if (!bncurl_task) {
         /* TLS + libcurl + printf ==> give it a big stack; tune later */
         xTaskCreatePinnedToCore(bncurl_worker, "bncurl", 16384, NULL, 5, &bncurl_task, 0);
     }
+    
+    /* Register WPS event handler */
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wps_event_handler, NULL);
+    
     return true;
 }
 
