@@ -266,14 +266,14 @@ AT+BNCURL=?
 Usage:
   AT+BNCURL?                                    Query last HTTP code/URL
   AT+BNCURL                                     Execute default request (internal URL)
-  AT+BNCURL=GET,"<url>"[,<options>...]       Perform HTTP GET
+  AT+BNCURL="GET","<url>"[,"<options>"...]    Perform HTTP GET
 Options:
   -dd <filepath>   Save body to SD card file (requires mounted SD)
 Examples:
-  AT+BNCURL=GET,"http://httpbin.org/get"       Stream to UART (HTTP)
-  AT+BNCURL=GET,"https://httpbin.org/get"      Stream to UART (HTTPS)
-  AT+BNCURL=GET,"http://httpbin.org/get",-dd,"/sdcard/response.json"   Save to file (HTTP)
-  AT+BNCURL=GET,"https://httpbin.org/get",-dd,"/sdcard/response.json"  Save to file (HTTPS)
+  AT+BNCURL="GET","http://httpbin.org/get"       Stream to UART (HTTP)
+  AT+BNCURL="GET","https://httpbin.org/get"      Stream to UART (HTTPS)
+  AT+BNCURL="GET","http://httpbin.org/get","-dd","/sdcard/response.json"   Save to file (HTTP)
+  AT+BNCURL="GET","https://httpbin.org/get","-dd","/sdcard/response.json"  Save to file (HTTPS)
 Note: Try HTTP first if HTTPS has TLS issues
 
 OK
@@ -281,7 +281,7 @@ OK
 
 #### Simple HTTP GET Request (Stream to UART)
 ```
-AT+BNCURL=GET,"http://httpbin.org/get"
+AT+BNCURL="GET","http://httpbin.org/get"
 ```
 **Expected Response Format:**
 ```
@@ -297,7 +297,7 @@ OK
 **Note: SD card must be mounted first!**
 
 ```
-AT+BNCURL=GET,"http://httpbin.org/get",-dd,"/sdcard/test_response.json"
+AT+BNCURL="GET","http://httpbin.org/get","-dd","/sdcard/test_response.json"
 ```
 **Expected Response:**
 ```

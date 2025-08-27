@@ -374,6 +374,64 @@ static inline void at_uart_write_locked(const uint8_t *data, size_t len) {
     if (at_uart_lock) xSemaphoreGive(at_uart_lock);
 }
 
+/* Header callback for HEAD requests - prints headers to UART */
+static size_t bncurl_header_print_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
+    size_t total = size * nitems;
+    bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
+    if (!ctx || total == 0) return total;
+
+    /* Print headers to UART with +HDR: prefix */
+    /* Skip the status line (first line) as it's usually "HTTP/1.1 200 OK" */
+    static bool first_header = true;
+    
+    if (first_header) {
+        /* Reset for each new request */
+        first_header = false;
+        at_uart_write_locked((const uint8_t*)"+HEADERS:\r\n", 11);
+    }
+    
+    /* Print each header line with +HDR: prefix */
+    if (total > 2) { /* Skip empty lines */
+        char header_line[512];
+        int prefix_len = snprintf(header_line, sizeof(header_line), "+HDR:");
+        
+        /* Copy header data, ensuring it fits */
+        size_t available_space = sizeof(header_line) - prefix_len - 3; /* 3 for \r\n\0 */
+        size_t copy_len = (total < available_space) ? total : available_space;
+        
+        memcpy(header_line + prefix_len, buffer, copy_len);
+        
+        /* Remove any existing \r\n and add our own */
+        while (copy_len > 0 && (header_line[prefix_len + copy_len - 1] == '\r' || 
+                               header_line[prefix_len + copy_len - 1] == '\n')) {
+            copy_len--;
+        }
+        
+        /* Add our line ending */
+        header_line[prefix_len + copy_len] = '\r';
+        header_line[prefix_len + copy_len + 1] = '\n';
+        header_line[prefix_len + copy_len + 2] = '\0';
+        
+        at_uart_write_locked((const uint8_t*)header_line, prefix_len + copy_len + 2);
+    }
+    
+    /* Also parse Content-Length for context */
+    if (total > 16) {
+        if (!strncasecmp(buffer, "Content-Length:", 15)) {
+            const char *p = buffer + 15;
+            while (*p == ' ' || *p == '\t') p++;
+            uint64_t len = 0;
+            for (; *p >= '0' && *p <= '9'; ++p) {
+                len = len * 10 + (uint64_t)(*p - '0');
+            }
+            ctx->content_length = len;
+            ctx->have_len = true;
+        }
+    }
+    
+    return total;
+}
+
 static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
     size_t total = size * nitems;
     bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
@@ -460,11 +518,94 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
 }
 
 
+/* Calculate timeout based on content length */
+static long calculate_timeout_ms(uint64_t content_length) {
+    if (content_length == 0) {
+        return 300000L; /* Default 5 minutes for unknown size */
+    }
+    
+    /* Conservative timeout calculation for files up to 1GB */
+    /* Assume minimum speed of 50KB/s (400 Kbps) for very slow connections */
+    /* Add safety margin for connection setup, TLS handshake, and network fluctuations */
+    const uint64_t min_speed_bytes_per_sec = 50 * 1024; /* 50 KB/s - conservative */
+    const long base_timeout_ms = 60000L; /* 60 seconds base for connection setup */
+    const long max_timeout_ms = 3600000L; /* 60 minutes maximum for 1GB files */
+    const long min_timeout_ms = 300000L; /* 5 minutes minimum */
+    
+    /* Calculate timeout with 2x safety margin */
+    long calculated_timeout = base_timeout_ms + (content_length * 2000 / min_speed_bytes_per_sec);
+    
+    /* Clamp to reasonable bounds */
+    if (calculated_timeout < min_timeout_ms) calculated_timeout = min_timeout_ms;
+    if (calculated_timeout > max_timeout_ms) calculated_timeout = max_timeout_ms;
+    
+    /* Log timeout calculation for debugging */
+    char debug_msg[128];
+    int n = snprintf(debug_msg, sizeof(debug_msg), 
+                    "+BNCURL: Size %lu bytes -> timeout %lu ms (%.1f min)\r\n", 
+                    (unsigned long)content_length, calculated_timeout, calculated_timeout / 60000.0);
+    at_uart_write_locked((const uint8_t*)debug_msg, n);
+    
+    return calculated_timeout;
+}
+
+/* Get content length via HEAD request */
+static uint64_t get_content_length(const char *url) {
+    CURL *h = curl_easy_init();
+    if (!h) return 0;
+    
+    uint64_t content_length = 0;
+    bncurl_ctx_t ctx = {0};
+    
+    /* Configure for HEAD request */
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_NOBODY, 1L); /* HEAD request */
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, 60000L); /* Short timeout for HEAD */
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "esp-at-libcurl/1.0");
+    
+    /* TLS configuration */
+#ifdef BNCURL_USE_CUSTOM_CA
+    struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
+    curl_easy_setopt(h, CURLOPT_CAINFO_BLOB, &ca);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+#else
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+#endif
+    
+    /* Header callback to get Content-Length */
+    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, bncurl_header_cb);
+    curl_easy_setopt(h, CURLOPT_HEADERDATA, &ctx);
+    
+    CURLcode rc = curl_easy_perform(h);
+    if (rc == CURLE_OK && ctx.have_len) {
+        content_length = ctx.content_length;
+    }
+    
+    curl_easy_cleanup(h);
+    return content_length;
+}
+
 static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, const char *save_path, bool save_to_file) {
     if (!bncurl_curl_inited) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
         bncurl_curl_inited = true;
     }
+    
+    /* Get content length for timeout calculation (only for GET requests) */
+    uint64_t content_length = 0;
+    long timeout_ms = 120000L; /* Default timeout */
+    
+    if (method == BNCURL_GET) {
+        content_length = get_content_length(url);
+        timeout_ms = calculate_timeout_ms(content_length);
+    } else if (method == BNCURL_HEAD) {
+        timeout_ms = 60000L; /* 1 minute timeout for HEAD requests */
+    }
+    
     CURL *h = curl_easy_init();
     if (!h) {
         const char *err = "+BNCURL: init failed\r\n";
@@ -477,6 +618,13 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
     
     /* Open file if saving to SD card */
     if (save_to_file && save_path) {
+        /* HEAD requests don't have body content to save */
+        if (method == BNCURL_HEAD) {
+            const char *warn = "+BNCURL: WARNING HEAD requests have no body to save to file\r\n";
+            at_uart_write_locked((const uint8_t*)warn, strlen(warn));
+            /* Still allow it but won't save any body content */
+        }
+        
         /* Check if SD card is mounted */
         if (!sd_mounted) {
             const char *err = "+BNCURL: ERROR SD card not mounted\r\n";
@@ -505,10 +653,16 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
 #ifdef BNCURL_FORCE_DNS
     curl_easy_setopt(h, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1");
 #endif
-    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  /* Increased timeout */
-    curl_easy_setopt(h, CURLOPT_TIMEOUT_MS,        120000L); /* Increased timeout */
-    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  /* Connection timeout */
+    curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, timeout_ms);     /* Auto-calculated timeout */
+    
+    /* Adjust low speed timeout based on file size */
+    long low_speed_time = 120L; /* Default 2 minutes */
+    if (content_length > 100 * 1024 * 1024) { /* Files > 100MB */
+        low_speed_time = 300L; /* 5 minutes for large files */
+    }
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);       /* 1 byte/sec minimum */
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, low_speed_time);
     curl_easy_setopt(h, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(h, CURLOPT_TCP_KEEPIDLE, 120L);
@@ -533,7 +687,13 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
 
     /* Headers & body handling for spec framing */
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "identity"); /* avoid gzip changing lengths */
-    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION,  bncurl_header_cb);
+    
+    /* Use different header callback for HEAD requests to print headers */
+    if (method == BNCURL_HEAD) {
+        curl_easy_setopt(h, CURLOPT_HEADERFUNCTION,  bncurl_header_print_cb);
+    } else {
+        curl_easy_setopt(h, CURLOPT_HEADERFUNCTION,  bncurl_header_cb);
+    }
     curl_easy_setopt(h, CURLOPT_HEADERDATA,      &ctx);
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION,   bncurl_sink_framed);
     curl_easy_setopt(h, CURLOPT_WRITEDATA,       &ctx);
@@ -564,7 +724,10 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
 
     /* Results and error reporting */
     if (rc == CURLE_OK) {
-        if (save_to_file) {
+        if (method == BNCURL_HEAD) {
+            const char *msg = "+BNCURL: HEAD request completed\r\n";
+            at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+        } else if (save_to_file) {
             char msg[128];
             int n = snprintf(msg, sizeof(msg), "+BNCURL: File saved (%lu bytes)\r\n", (unsigned long)ctx.total_bytes);
             at_uart_write_locked((const uint8_t*)msg, n);
@@ -610,14 +773,18 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  AT+BNCURL?                                    Query last HTTP code/URL\r\n"
         "  AT+BNCURL                                     Execute default request (internal URL)\r\n"
         "  AT+BNCURL=GET,\"<url>\"[,<options>...]       Perform HTTP GET\r\n"
+        "  AT+BNCURL=HEAD,\"<url>\"[,<options>...]      Perform HTTP HEAD (prints headers)\r\n"
         "Options:\r\n"
         "  -dd <filepath>   Save body to SD card file (requires mounted SD)\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
+        "  AT+BNCURL=HEAD,\"http://httpbin.org/get\"      Print headers to UART (HTTP)\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\"      Stream to UART (HTTPS)\r\n"
+        "  AT+BNCURL=HEAD,\"https://httpbin.org/get\"     Print headers to UART (HTTPS)\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/response.json\"   Save to file (HTTP)\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\",-dd,\"/sdcard/response.json\"  Save to file (HTTPS)\r\n"
-        "Note: Try HTTP first if HTTPS has TLS issues\r\n";
+        "Note: Try HTTP first if HTTPS has TLS issues\r\n"
+        "Note: HEAD method prints headers with +HDR: prefix\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -640,7 +807,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     if (esp_at_get_para_as_str(0, &method_str) != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
     if (esp_at_get_para_as_str(1, &url)        != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
 
-    /* Method mapping (currently only GET supported) */
+    /* Method mapping - now supports GET and HEAD */
     bncurl_method_t method = BNCURL_GET;
     bool matched = false;
     for (int i = 0; i < BNCURL_METHOD_MAX; i++) {
@@ -650,8 +817,8 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
             break;
         }
     }
-    if (!matched || method != BNCURL_GET) {
-        const char *e = "+BNCURL: ERROR unsupported method (only GET for now)\r\n";
+    if (!matched || (method != BNCURL_GET && method != BNCURL_HEAD)) {
+        const char *e = "+BNCURL: ERROR unsupported method (GET and HEAD supported)\r\n";
         at_uart_write_locked((const uint8_t*)e, strlen(e));
         return ESP_AT_RESULT_CODE_ERROR;
     }
@@ -709,7 +876,8 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(120000)) != pdTRUE) {
+    /* Wait for completion with extended timeout for large files (up to 60 minutes) */
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(3600000)) != pdTRUE) {
         vSemaphoreDelete(req->done);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
@@ -737,7 +905,8 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(120000)) != pdTRUE) {
+    /* Wait for completion with extended timeout for large files (up to 60 minutes) */
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(3600000)) != pdTRUE) {
         vSemaphoreDelete(req->done);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
