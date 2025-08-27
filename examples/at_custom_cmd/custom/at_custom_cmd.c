@@ -369,6 +369,9 @@ typedef struct {
     char upload_path[256];       /* file path for -du file upload */
     bool upload_from_file;       /* whether to upload from file vs UART */
     
+    /* Custom headers */
+    struct curl_slist *headers;  /* curl header list */
+    
     SemaphoreHandle_t done;
     uint8_t result_code;
 } bncurl_req_t;
@@ -843,6 +846,11 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
         default: break;
     }
 
+    /* Set custom headers if provided */
+    if (req->headers) {
+        curl_easy_setopt(h, CURLOPT_HTTPHEADER, req->headers);
+    }
+
     CURLcode rc = curl_easy_perform(h);
     long http_code = 0;
     if (rc == CURLE_OK) curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &http_code);
@@ -917,11 +925,13 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  -dd <filepath>   Save body to SD card file (auto-creates directories)\r\n"
         "  -du <size>       Upload <size> bytes from UART for POST requests\r\n"
         "  -du <filepath>   Upload file content for POST requests (@ prefix optional)\r\n"
+        "  -H <header>      Add custom HTTP header (up to 10 headers)\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
         "  AT+BNCURL=HEAD,\"http://httpbin.org/get\"      Print headers to UART (HTTP)\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\"  Upload 8 bytes from UART\r\n"
         "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"/Upload/data.bin\"  Upload file\r\n"
+        "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\",-H,\"Content-Type: text/plain\"  POST with header\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\"      Stream to UART (HTTPS)\r\n"
         "  AT+BNCURL=HEAD,\"https://httpbin.org/get\"     Print headers to UART (HTTPS)\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/data/response.json\"   Save to file (HTTP)\r\n"
@@ -968,13 +978,18 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Parse optional arguments. Now -dd (file save) and -du (data upload) are implemented. */
+    /* Parse optional arguments. Now -dd (file save), -du (data upload), and -H (headers) are implemented. */
     bool want_file = false;
     char file_path_tmp[128] = {0};
     bool want_upload = false;
     char upload_param[128] = {0};
     bool upload_from_file = false;
     size_t upload_size = 0;
+    
+    /* Custom headers storage */
+    #define MAX_HEADERS 10
+    char headers_list[MAX_HEADERS][256];
+    int header_count = 0;
     
     /* Parse all parameters starting from parameter 2 */
     for (int i = 2; i < para_num - 1; i++) {
@@ -1023,11 +1038,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                             /* UART size parameter */
                             upload_from_file = false;
                             upload_size = (size_t)atoi(upload_param);
-                            if (upload_size == 0) {
-                                const char *e = "+BNCURL: ERROR invalid -du size parameter\r\n";
-                                at_uart_write_locked((const uint8_t*)e, strlen(e));
-                                return ESP_AT_RESULT_CODE_ERROR;
-                            }
+                            /* Allow upload_size == 0 for empty POST body */
                         }
                         
                         char debug_msg[128];
@@ -1039,6 +1050,30 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                         at_uart_write_locked((const uint8_t*)e, strlen(e));
                         return ESP_AT_RESULT_CODE_ERROR;
                     }
+                }
+            } else if (strcasecmp((const char*)opt, "-H") == 0) {
+                /* Found -H flag, get header from next parameter */
+                if (i + 1 < para_num && header_count < MAX_HEADERS) {
+                    uint8_t *header = NULL;
+                    result = esp_at_get_para_as_str(i + 1, &header);
+                    if (result == ESP_AT_PARA_PARSE_RESULT_OK && header) {
+                        strncpy(headers_list[header_count], (const char*)header, sizeof(headers_list[header_count])-1);
+                        headers_list[header_count][sizeof(headers_list[header_count])-1] = '\0';
+                        header_count++;
+                        i++; /* Skip next parameter as it's the header */
+                        
+                        char debug_msg[128];
+                        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG header: %s\r\n", (const char*)header);
+                        at_uart_write_locked((const uint8_t*)debug_msg, n);
+                    } else {
+                        const char *e = "+BNCURL: ERROR reading -H parameter\r\n";
+                        at_uart_write_locked((const uint8_t*)e, strlen(e));
+                        return ESP_AT_RESULT_CODE_ERROR;
+                    }
+                } else {
+                    const char *e = "+BNCURL: ERROR too many headers or missing -H parameter\r\n";
+                    at_uart_write_locked((const uint8_t*)e, strlen(e));
+                    return ESP_AT_RESULT_CODE_ERROR;
                 }
             }
         }
@@ -1115,8 +1150,23 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         }
     }
     
+    /* Setup custom headers */
+    req->headers = NULL;
+    for (int i = 0; i < header_count; i++) {
+        req->headers = curl_slist_append(req->headers, headers_list[i]);
+        if (!req->headers) {
+            const char *e = "+BNCURL: ERROR failed to add header\r\n";
+            at_uart_write_locked((const uint8_t*)e, strlen(e));
+            if (req->headers) curl_slist_free_all(req->headers);
+            if (req->upload_data) free(req->upload_data);
+            free(req);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+    }
+    
     req->done = xSemaphoreCreateBinary();
     if (!req->done) { 
+        if (req->headers) curl_slist_free_all(req->headers);
         if (req->upload_data) free(req->upload_data);
         free(req); 
         return ESP_AT_RESULT_CODE_ERROR; 
@@ -1124,6 +1174,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
 
     if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
         vSemaphoreDelete(req->done);
+        if (req->headers) curl_slist_free_all(req->headers);
         if (req->upload_data) free(req->upload_data);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
@@ -1132,12 +1183,14 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     /* Wait for completion with extended timeout for large files (up to 60 minutes) */
     if (xSemaphoreTake(req->done, pdMS_TO_TICKS(3600000)) != pdTRUE) {
         vSemaphoreDelete(req->done);
+        if (req->headers) curl_slist_free_all(req->headers);
         if (req->upload_data) free(req->upload_data);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     uint8_t rc = req->result_code;
     vSemaphoreDelete(req->done);
+    if (req->headers) curl_slist_free_all(req->headers);
     if (req->upload_data) free(req->upload_data);
     free(req);
     return rc;
