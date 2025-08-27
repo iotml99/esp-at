@@ -14,6 +14,7 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/spi_master.h"
+#include "driver/uart.h"
 #include "driver/sdspi_host.h"
 #include "esp_log.h"
 
@@ -358,6 +359,16 @@ typedef struct {
     char url[256];
     char save_path[256];         /* file path for -dd option */
     bool save_to_file;           /* true if saving to file */
+    
+    /* POST data upload fields */
+    bool has_upload_data;        /* whether POST has data to upload */
+    char *upload_data;           /* buffer for POST data (for UART input) */
+    size_t upload_size;          /* size of POST data */
+    size_t upload_expected;      /* expected size for UART input */
+    size_t upload_read_pos;      /* current read position for UART upload */
+    char upload_path[256];       /* file path for -du file upload */
+    bool upload_from_file;       /* whether to upload from file vs UART */
+    
     SemaphoreHandle_t done;
     uint8_t result_code;
 } bncurl_req_t;
@@ -366,12 +377,20 @@ typedef struct {
 static QueueHandle_t     bncurl_q      = NULL;
 static TaskHandle_t      bncurl_task   = NULL;
 static SemaphoreHandle_t at_uart_lock  = NULL;
+static SemaphoreHandle_t data_input_sema = NULL;
 
 /* Thread-safe write to AT UART */
 static inline void at_uart_write_locked(const uint8_t *data, size_t len) {
     if (at_uart_lock) xSemaphoreTake(at_uart_lock, portMAX_DELAY);
     esp_at_port_write_data(data, len);
     if (at_uart_lock) xSemaphoreGive(at_uart_lock);
+}
+
+/* Data input callback for UART data reading */
+static void at_bncurl_wait_data_cb(void) {
+    if (data_input_sema) {
+        xSemaphoreGive(data_input_sema);
+    }
 }
 
 /* Create directory recursively */
@@ -482,6 +501,42 @@ static size_t bncurl_header_print_cb(char *buffer, size_t size, size_t nitems, v
     }
     
     return total;
+}
+
+/* ================= POST data read callback ================= */
+static size_t bncurl_read_callback(void *buffer, size_t size, size_t nitems, void *userdata) {
+    bncurl_req_t *req = (bncurl_req_t*)userdata;
+    size_t max_read = size * nitems;
+    
+    if (!req->has_upload_data) {
+        return 0; /* No data to upload */
+    }
+    
+    if (req->upload_from_file) {
+        /* Read from file */
+        FILE *fp = fopen(req->upload_path, "rb");
+        if (!fp) {
+            at_uart_write_locked((const uint8_t*)"+BNCURL: ERROR failed to open upload file\r\n", 44);
+            return CURL_READFUNC_ABORT;
+        }
+        
+        size_t read_size = fread(buffer, 1, max_read, fp);
+        fclose(fp);
+        return read_size;
+    } else {
+        /* Memory buffer upload (UART input) */
+        if (!req->upload_data || req->upload_read_pos >= req->upload_size) {
+            return 0; /* No more data */
+        }
+        
+        size_t remaining = req->upload_size - req->upload_read_pos;
+        size_t to_copy = (max_read < remaining) ? max_read : remaining;
+        
+        memcpy(buffer, req->upload_data + req->upload_read_pos, to_copy);
+        req->upload_read_pos += to_copy;
+        
+        return to_copy;
+    }
 }
 
 static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
@@ -641,7 +696,7 @@ static uint64_t get_content_length(const char *url) {
     return content_length;
 }
 
-static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, const char *save_path, bool save_to_file) {
+static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     if (!bncurl_curl_inited) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
         bncurl_curl_inited = true;
@@ -651,11 +706,13 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
     uint64_t content_length = 0;
     long timeout_ms = 120000L; /* Default timeout */
     
-    if (method == BNCURL_GET) {
-        content_length = get_content_length(url);
+    if (req->method == BNCURL_GET) {
+        content_length = get_content_length(req->url);
         timeout_ms = calculate_timeout_ms(content_length);
-    } else if (method == BNCURL_HEAD) {
+    } else if (req->method == BNCURL_HEAD) {
         timeout_ms = 60000L; /* 1 minute timeout for HEAD requests */
+    } else if (req->method == BNCURL_POST) {
+        timeout_ms = 300000L; /* 5 minute timeout for POST requests */
     }
     
     CURL *h = curl_easy_init();
@@ -666,12 +723,12 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
     }
 
     bncurl_ctx_t ctx = {0};
-    ctx.save_to_file = save_to_file;
+    ctx.save_to_file = req->save_to_file;
     
     /* Open file if saving to SD card */
-    if (save_to_file && save_path) {
+    if (req->save_to_file && req->save_path[0]) {
         /* HEAD requests don't have body content to save */
-        if (method == BNCURL_HEAD) {
+        if (req->method == BNCURL_HEAD) {
             const char *warn = "+BNCURL: WARNING HEAD requests have no body to save to file\r\n";
             at_uart_write_locked((const uint8_t*)warn, strlen(warn));
             /* Still allow it but won't save any body content */
@@ -686,7 +743,7 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
         }
         
         /* Create directories if they don't exist */
-        esp_err_t dir_result = create_directory_recursive(save_path);
+        esp_err_t dir_result = create_directory_recursive(req->save_path);
         if (dir_result != ESP_OK) {
             const char *err = "+BNCURL: ERROR cannot create directory path\r\n";
             at_uart_write_locked((const uint8_t*)err, strlen(err));
@@ -694,7 +751,7 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
-        ctx.save_file = fopen(save_path, "wb");
+        ctx.save_file = fopen(req->save_path, "wb");
         if (!ctx.save_file) {
             const char *err = "+BNCURL: ERROR cannot open file for writing\r\n";
             at_uart_write_locked((const uint8_t*)err, strlen(err));
@@ -703,12 +760,12 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
         }
         
         char msg[128];
-        int n = snprintf(msg, sizeof(msg), "+BNCURL: Saving to file: %s\r\n", save_path);
+        int n = snprintf(msg, sizeof(msg), "+BNCURL: Saving to file: %s\r\n", req->save_path);
         at_uart_write_locked((const uint8_t*)msg, n);
     }
 
     /* —— libcurl setup —— */
-    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_URL, req->url);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(h, CURLOPT_USERAGENT, "esp-at-libcurl/1.0");
 #ifdef BNCURL_FORCE_DNS
@@ -750,7 +807,7 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "identity"); /* avoid gzip changing lengths */
     
     /* Use different header callback for HEAD requests to print headers */
-    if (method == BNCURL_HEAD) {
+    if (req->method == BNCURL_HEAD) {
         curl_easy_setopt(h, CURLOPT_HEADERFUNCTION,  bncurl_header_print_cb);
     } else {
         curl_easy_setopt(h, CURLOPT_HEADERFUNCTION,  bncurl_header_cb);
@@ -760,10 +817,29 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
     curl_easy_setopt(h, CURLOPT_WRITEDATA,       &ctx);
 
     /* Method selection */
-    switch (method) {
+    switch (req->method) {
         case BNCURL_GET:  curl_easy_setopt(h, CURLOPT_HTTPGET, 1L); break;
         case BNCURL_HEAD: curl_easy_setopt(h, CURLOPT_NOBODY,  1L); break;
-        case BNCURL_POST: curl_easy_setopt(h, CURLOPT_POST,    1L); /* add POSTFIELDS later */ break;
+        case BNCURL_POST: 
+            curl_easy_setopt(h, CURLOPT_POST, 1L);
+            if (req->has_upload_data) {
+                /* Set up POST data */
+                if (req->upload_from_file) {
+                    /* Get file size for Content-Length */
+                    struct stat st;
+                    if (stat(req->upload_path, &st) == 0) {
+                        curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)st.st_size);
+                    }
+                } else {
+                    curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req->upload_size);
+                }
+                curl_easy_setopt(h, CURLOPT_READFUNCTION, bncurl_read_callback);
+                curl_easy_setopt(h, CURLOPT_READDATA, req);
+            } else {
+                /* Empty POST */
+                curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, 0L);
+            }
+            break;
         default: break;
     }
 
@@ -772,7 +848,7 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
     if (rc == CURLE_OK) curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &http_code);
 
     bncurl_last_http_code = (rc == CURLE_OK) ? http_code : -1;
-    strncpy(bncurl_last_url, url, sizeof(bncurl_last_url) - 1);
+    strncpy(bncurl_last_url, req->url, sizeof(bncurl_last_url) - 1);
     bncurl_last_url[sizeof(bncurl_last_url) - 1] = '\0';
     
     /* Close file if it was opened */
@@ -785,10 +861,13 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
 
     /* Results and error reporting */
     if (rc == CURLE_OK) {
-        if (method == BNCURL_HEAD) {
+        if (req->method == BNCURL_HEAD) {
             const char *msg = "+BNCURL: HEAD request completed\r\n";
             at_uart_write_locked((const uint8_t*)msg, strlen(msg));
-        } else if (save_to_file) {
+        } else if (req->method == BNCURL_POST) {
+            const char *msg = "+BNCURL: POST request completed\r\n";
+            at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+        } else if (req->save_to_file) {
             char msg[128];
             int n = snprintf(msg, sizeof(msg), "+BNCURL: File saved (%lu bytes)\r\n", (unsigned long)ctx.total_bytes);
             at_uart_write_locked((const uint8_t*)msg, n);
@@ -819,9 +898,7 @@ static void bncurl_worker(void *arg) {
     for (;;) {
         bncurl_req_t *req_ptr = NULL;
         if (xQueueReceive(bncurl_q, &req_ptr, portMAX_DELAY) == pdTRUE && req_ptr) {
-            req_ptr->result_code = bncurl_perform_internal(req_ptr->method, req_ptr->url, 
-                                                          req_ptr->save_to_file ? req_ptr->save_path : NULL, 
-                                                          req_ptr->save_to_file);
+            req_ptr->result_code = bncurl_perform_internal(req_ptr);
             if (req_ptr->done) xSemaphoreGive(req_ptr->done);
         }
     }
@@ -835,17 +912,23 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  AT+BNCURL                                     Execute default request (internal URL)\r\n"
         "  AT+BNCURL=GET,\"<url>\"[,<options>...]       Perform HTTP GET\r\n"
         "  AT+BNCURL=HEAD,\"<url>\"[,<options>...]      Perform HTTP HEAD (prints headers)\r\n"
+        "  AT+BNCURL=POST,\"<url>\",<options>...        Perform HTTP POST with data upload\r\n"
         "Options:\r\n"
         "  -dd <filepath>   Save body to SD card file (auto-creates directories)\r\n"
+        "  -du <size>       Upload <size> bytes from UART for POST requests\r\n"
+        "  -du <filepath>   Upload file content for POST requests (@ prefix optional)\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
         "  AT+BNCURL=HEAD,\"http://httpbin.org/get\"      Print headers to UART (HTTP)\r\n"
+        "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"8\"  Upload 8 bytes from UART\r\n"
+        "  AT+BNCURL=POST,\"http://httpbin.org/post\",-du,\"/Upload/data.bin\"  Upload file\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\"      Stream to UART (HTTPS)\r\n"
         "  AT+BNCURL=HEAD,\"https://httpbin.org/get\"     Print headers to UART (HTTPS)\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/data/response.json\"   Save to file (HTTP)\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\",-dd,\"/sdcard/downloads/test.json\"  Save to file (HTTPS)\r\n"
         "Note: Try HTTP first if HTTPS has TLS issues\r\n"
         "Note: HEAD method prints headers with +HDR: prefix\r\n"
+        "Note: POST with -du prompts with > for UART input\r\n"
         "Note: Directories are created automatically if they don't exist\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
@@ -869,7 +952,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     if (esp_at_get_para_as_str(0, &method_str) != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
     if (esp_at_get_para_as_str(1, &url)        != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
 
-    /* Method mapping - now supports GET and HEAD */
+    /* Method mapping - now supports GET, HEAD, and POST */
     bncurl_method_t method = BNCURL_GET;
     bool matched = false;
     for (int i = 0; i < BNCURL_METHOD_MAX; i++) {
@@ -879,46 +962,93 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
             break;
         }
     }
-    if (!matched || (method != BNCURL_GET && method != BNCURL_HEAD)) {
-        const char *e = "+BNCURL: ERROR unsupported method (GET and HEAD supported)\r\n";
+    if (!matched || (method != BNCURL_GET && method != BNCURL_HEAD && method != BNCURL_POST)) {
+        const char *e = "+BNCURL: ERROR unsupported method (GET, HEAD, and POST supported)\r\n";
         at_uart_write_locked((const uint8_t*)e, strlen(e));
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Parse optional arguments. Now -dd (file save) is implemented. */
+    /* Parse optional arguments. Now -dd (file save) and -du (data upload) are implemented. */
     bool want_file = false;
     char file_path_tmp[128] = {0};
+    bool want_upload = false;
+    char upload_param[128] = {0};
+    bool upload_from_file = false;
+    size_t upload_size = 0;
     
-    /* Check if we have at least 4 parameters for -dd option */
-    if (para_num >= 4) {
-        /* Try to parse parameter 2 as the -dd flag */
+    /* Parse all parameters starting from parameter 2 */
+    for (int i = 2; i < para_num - 1; i++) {
         uint8_t *opt = NULL;
-        esp_at_para_parse_result_type result = esp_at_get_para_as_str(2, &opt);
+        esp_at_para_parse_result_type result = esp_at_get_para_as_str(i, &opt);
         
-        if (result == ESP_AT_PARA_PARSE_RESULT_OK && opt && strcasecmp((const char*)opt, "-dd") == 0) {
-            /* Found -dd flag, now get the file path from parameter 3 */
-            uint8_t *path = NULL;
-            result = esp_at_get_para_as_str(3, &path);
-            
-            if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
-                strncpy(file_path_tmp, (const char*)path, sizeof(file_path_tmp)-1);
-                want_file = true;
-                
-                /* Debug: confirm file path received */
-                char debug_msg[128];
-                int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG file path set to: %s\r\n", file_path_tmp);
-                at_uart_write_locked((const uint8_t*)debug_msg, n);
-            } else {
-                const char *e = "+BNCURL: ERROR reading -dd path parameter\r\n";
-                at_uart_write_locked((const uint8_t*)e, strlen(e));
-                return ESP_AT_RESULT_CODE_ERROR;
+        if (result == ESP_AT_PARA_PARSE_RESULT_OK && opt) {
+            if (strcasecmp((const char*)opt, "-dd") == 0) {
+                /* Found -dd flag, get file path from next parameter */
+                if (i + 1 < para_num) {
+                    uint8_t *path = NULL;
+                    result = esp_at_get_para_as_str(i + 1, &path);
+                    if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
+                        strncpy(file_path_tmp, (const char*)path, sizeof(file_path_tmp)-1);
+                        want_file = true;
+                        i++; /* Skip next parameter as it's the path */
+                        
+                        char debug_msg[128];
+                        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG file path set to: %s\r\n", file_path_tmp);
+                        at_uart_write_locked((const uint8_t*)debug_msg, n);
+                    } else {
+                        const char *e = "+BNCURL: ERROR reading -dd path parameter\r\n";
+                        at_uart_write_locked((const uint8_t*)e, strlen(e));
+                        return ESP_AT_RESULT_CODE_ERROR;
+                    }
+                }
+            } else if (strcasecmp((const char*)opt, "-du") == 0) {
+                /* Found -du flag, get upload parameter from next parameter */
+                if (i + 1 < para_num) {
+                    uint8_t *param = NULL;
+                    result = esp_at_get_para_as_str(i + 1, &param);
+                    if (result == ESP_AT_PARA_PARSE_RESULT_OK && param) {
+                        strncpy(upload_param, (const char*)param, sizeof(upload_param)-1);
+                        want_upload = true;
+                        i++; /* Skip next parameter as it's the upload param */
+                        
+                        /* Check if it's a file path (starts with @ or is a path) */
+                        if (upload_param[0] == '@') {
+                            /* File upload - remove @ prefix */
+                            upload_from_file = true;
+                            memmove(upload_param, upload_param + 1, strlen(upload_param));
+                        } else if (upload_param[0] == '/' || strchr(upload_param, '/') != NULL) {
+                            /* File path without @ prefix */
+                            upload_from_file = true;
+                        } else {
+                            /* UART size parameter */
+                            upload_from_file = false;
+                            upload_size = (size_t)atoi(upload_param);
+                            if (upload_size == 0) {
+                                const char *e = "+BNCURL: ERROR invalid -du size parameter\r\n";
+                                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                                return ESP_AT_RESULT_CODE_ERROR;
+                            }
+                        }
+                        
+                        char debug_msg[128];
+                        int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG upload %s: %s\r\n", 
+                                        upload_from_file ? "file" : "UART", upload_param);
+                        at_uart_write_locked((const uint8_t*)debug_msg, n);
+                    } else {
+                        const char *e = "+BNCURL: ERROR reading -du parameter\r\n";
+                        at_uart_write_locked((const uint8_t*)e, strlen(e));
+                        return ESP_AT_RESULT_CODE_ERROR;
+                    }
+                }
             }
-        } else {
-            /* Debug: show parsing issue */
-            char debug_msg[128];
-            int n = snprintf(debug_msg, sizeof(debug_msg), "+BNCURL: DEBUG param 2 not -dd flag (result=%d)\r\n", result);
-            at_uart_write_locked((const uint8_t*)debug_msg, n);
         }
+    }
+
+    /* Validate POST upload parameters */
+    if (want_upload && method != BNCURL_POST) {
+        const char *e = "+BNCURL: ERROR -du parameter only valid with POST method\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
     }
 
     bncurl_req_t *req = (bncurl_req_t*)calloc(1, sizeof(bncurl_req_t));
@@ -929,11 +1059,72 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     if (want_file) {
         strncpy(req->save_path, file_path_tmp, sizeof(req->save_path)-1);
     }
+    
+    /* Setup POST upload data */
+    req->has_upload_data = want_upload;
+    if (want_upload) {
+        req->upload_from_file = upload_from_file;
+        if (upload_from_file) {
+            strncpy(req->upload_path, upload_param, sizeof(req->upload_path)-1);
+        } else {
+            /* UART input - read data using ESP-AT mechanism */
+            req->upload_expected = upload_size;
+            req->upload_data = (char*)malloc(upload_size + 1);
+            if (!req->upload_data) {
+                free(req);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            /* Enter data input mode and send prompt */
+            esp_at_port_enter_specific(at_bncurl_wait_data_cb);
+            esp_at_response_result(ESP_AT_RESULT_CODE_OK_AND_INPUT_PROMPT);
+            
+            /* Read data from AT port */
+            size_t bytes_read = 0;
+            while (bytes_read < upload_size) {
+                if (xSemaphoreTake(data_input_sema, pdMS_TO_TICKS(30000))) {
+                    size_t read_len = esp_at_port_read_data(
+                        (uint8_t*)(req->upload_data + bytes_read), 
+                        upload_size - bytes_read
+                    );
+                    bytes_read += read_len;
+                    
+                    if (bytes_read >= upload_size) {
+                        break;
+                    }
+                } else {
+                    /* Timeout */
+                    const char *e = "+BNCURL: ERROR timeout reading upload data\r\n";
+                    at_uart_write_locked((const uint8_t*)e, strlen(e));
+                    free(req->upload_data);
+                    free(req);
+                    esp_at_port_exit_specific();
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+            }
+            
+            esp_at_port_exit_specific();
+            req->upload_data[upload_size] = '\0';
+            req->upload_size = upload_size;
+            req->upload_read_pos = 0;
+            
+            /* Report data received */
+            char msg[64];
+            int n = snprintf(msg, sizeof(msg), "+LEN:%lu\r\n", (unsigned long)upload_size);
+            at_uart_write_locked((const uint8_t*)msg, n);
+        }
+    }
+    
     req->done = xSemaphoreCreateBinary();
-    if (!req->done) { free(req); return ESP_AT_RESULT_CODE_ERROR; }
+    if (!req->done) { 
+        if (req->upload_data) free(req->upload_data);
+        free(req); 
+        return ESP_AT_RESULT_CODE_ERROR; 
+    }
 
     if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
         vSemaphoreDelete(req->done);
+        if (req->upload_data) free(req->upload_data);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
@@ -941,11 +1132,13 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     /* Wait for completion with extended timeout for large files (up to 60 minutes) */
     if (xSemaphoreTake(req->done, pdMS_TO_TICKS(3600000)) != pdTRUE) {
         vSemaphoreDelete(req->done);
+        if (req->upload_data) free(req->upload_data);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     uint8_t rc = req->result_code;
     vSemaphoreDelete(req->done);
+    if (req->upload_data) free(req->upload_data);
     free(req);
     return rc;
 }
@@ -995,6 +1188,7 @@ bool esp_at_custom_cmd_register(void)
     if (!ok) return false;
 
     if (!at_uart_lock) at_uart_lock = xSemaphoreCreateMutex();
+    if (!data_input_sema) data_input_sema = xSemaphoreCreateBinary();
     if (!bncurl_q)     bncurl_q = xQueueCreate(2, sizeof(bncurl_req_t*));
     if (!bncurl_task) {
         /* TLS + libcurl + printf ==> give it a big stack; tune later */
