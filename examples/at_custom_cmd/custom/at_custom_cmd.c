@@ -374,6 +374,58 @@ static inline void at_uart_write_locked(const uint8_t *data, size_t len) {
     if (at_uart_lock) xSemaphoreGive(at_uart_lock);
 }
 
+/* Create directory recursively */
+static esp_err_t create_directory_recursive(const char *path) {
+    if (!path) return ESP_ERR_INVALID_ARG;
+    
+    char temp_path[256];
+    strncpy(temp_path, path, sizeof(temp_path) - 1);
+    temp_path[sizeof(temp_path) - 1] = '\0';
+    
+    /* Remove filename from path to get directory */
+    char *last_slash = strrchr(temp_path, '/');
+    if (!last_slash) return ESP_OK; /* No directory separator found */
+    
+    *last_slash = '\0'; /* Terminate at last slash to get directory path */
+    
+    /* Check if directory already exists */
+    struct stat st = {0};
+    if (stat(temp_path, &st) == 0) {
+        return ESP_OK; /* Directory already exists */
+    }
+    
+    /* Notify user that directories will be created */
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg), "+BNCURL: Creating directory: %s\r\n", temp_path);
+    at_uart_write_locked((const uint8_t*)msg, n);
+    
+    /* Create parent directories first */
+    char *pos = temp_path + 1; /* Skip leading slash */
+    while ((pos = strchr(pos, '/')) != NULL) {
+        *pos = '\0';
+        
+        if (stat(temp_path, &st) != 0) {
+            if (mkdir(temp_path, 0755) != 0) {
+                ESP_LOGE(TAG, "Failed to create directory: %s", temp_path);
+                return ESP_FAIL;
+            }
+        }
+        
+        *pos = '/';
+        pos++;
+    }
+    
+    /* Create the final directory */
+    if (stat(temp_path, &st) != 0) {
+        if (mkdir(temp_path, 0755) != 0) {
+            ESP_LOGE(TAG, "Failed to create directory: %s", temp_path);
+            return ESP_FAIL;
+        }
+    }
+    
+    return ESP_OK;
+}
+
 /* Header callback for HEAD requests - prints headers to UART */
 static size_t bncurl_header_print_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
     size_t total = size * nitems;
@@ -633,6 +685,15 @@ static uint8_t bncurl_perform_internal(bncurl_method_t method, const char *url, 
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
+        /* Create directories if they don't exist */
+        esp_err_t dir_result = create_directory_recursive(save_path);
+        if (dir_result != ESP_OK) {
+            const char *err = "+BNCURL: ERROR cannot create directory path\r\n";
+            at_uart_write_locked((const uint8_t*)err, strlen(err));
+            curl_easy_cleanup(h);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
         ctx.save_file = fopen(save_path, "wb");
         if (!ctx.save_file) {
             const char *err = "+BNCURL: ERROR cannot open file for writing\r\n";
@@ -775,16 +836,17 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  AT+BNCURL=GET,\"<url>\"[,<options>...]       Perform HTTP GET\r\n"
         "  AT+BNCURL=HEAD,\"<url>\"[,<options>...]      Perform HTTP HEAD (prints headers)\r\n"
         "Options:\r\n"
-        "  -dd <filepath>   Save body to SD card file (requires mounted SD)\r\n"
+        "  -dd <filepath>   Save body to SD card file (auto-creates directories)\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=GET,\"http://httpbin.org/get\"       Stream to UART (HTTP)\r\n"
         "  AT+BNCURL=HEAD,\"http://httpbin.org/get\"      Print headers to UART (HTTP)\r\n"
         "  AT+BNCURL=GET,\"https://httpbin.org/get\"      Stream to UART (HTTPS)\r\n"
         "  AT+BNCURL=HEAD,\"https://httpbin.org/get\"     Print headers to UART (HTTPS)\r\n"
-        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/response.json\"   Save to file (HTTP)\r\n"
-        "  AT+BNCURL=GET,\"https://httpbin.org/get\",-dd,\"/sdcard/response.json\"  Save to file (HTTPS)\r\n"
+        "  AT+BNCURL=GET,\"http://httpbin.org/get\",-dd,\"/sdcard/data/response.json\"   Save to file (HTTP)\r\n"
+        "  AT+BNCURL=GET,\"https://httpbin.org/get\",-dd,\"/sdcard/downloads/test.json\"  Save to file (HTTPS)\r\n"
         "Note: Try HTTP first if HTTPS has TLS issues\r\n"
-        "Note: HEAD method prints headers with +HDR: prefix\r\n";
+        "Note: HEAD method prints headers with +HDR: prefix\r\n"
+        "Note: Directories are created automatically if they don't exist\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
 }
