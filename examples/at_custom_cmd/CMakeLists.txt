@@ -1,7 +1,10 @@
 
-file(GLOB_RECURSE srcs *.c)
+set(srcs 
+    "custom/at_custom_cmd.c"
+    "custom/sd_card.c"
+)
 
-set(includes "include")
+set(includes "include" "custom")
 
 # Add more required components you need here, separated by spaces
 set(require_components at freertos nvs_flash fatfs sdmmc driver esp_driver_spi esp_driver_sdspi)
