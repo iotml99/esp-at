@@ -225,7 +225,7 @@ static SemaphoreHandle_t data_input_sema = NULL;
 /* Thread-safe write to AT UART */
 static inline void at_uart_write_locked(const uint8_t *data, size_t len) {
     if (at_uart_lock) xSemaphoreTake(at_uart_lock, portMAX_DELAY);
-    esp_at_port_write_data(data, len);
+    esp_at_port_write_data((uint8_t*)data, len);
     if (at_uart_lock) xSemaphoreGive(at_uart_lock);
 }
 
@@ -1191,12 +1191,18 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+TEST",         at_test_cmd_test,       at_query_cmd_test,    at_setup_cmd_test,   at_exe_cmd_test},
     {"+BNSD_MOUNT",   at_bnsd_mount_cmd_test, at_bnsd_mount_cmd_query, NULL,             at_bnsd_mount_cmd_exe},
     {"+BNSD_UNMOUNT", at_bnsd_unmount_cmd_test, at_bnsd_unmount_cmd_query, NULL,         at_bnsd_unmount_cmd_exe},
+    {"+BNSD_FORMAT",  at_bnsd_format_cmd_test, at_bnsd_format_cmd_query, NULL,           at_bnsd_format_cmd_exe},
+    {"+BNSD_SPACE",   at_bnsd_space_cmd_test, at_bnsd_space_cmd_query, NULL,             at_bnsd_space_cmd_exe},
     {"+BNCURL",       at_bncurl_cmd_test,     at_bncurl_cmd_query,  at_bncurl_cmd_setup, at_bncurl_cmd_exe},
     /* add further custom AT commands here */
 };
 
 bool esp_at_custom_cmd_register(void)
 {
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
+
+    sd_card_init();
+    
     bool ok = esp_at_custom_cmd_array_regist(at_custom_cmd, sizeof(at_custom_cmd) / sizeof(esp_at_cmd_struct));
     if (!ok) return false;
 

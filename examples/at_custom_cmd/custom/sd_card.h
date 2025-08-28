@@ -23,6 +23,18 @@ extern "C" {
 #define PIN_NUM_CLK   17
 #define PIN_NUM_MISO  16
 
+
+/**
+ * @brief Initialize SD card
+ *
+ * @return
+ *     - ESP_OK on success
+ *     - ESP_FAIL if failed to initialize
+ *     - Other ESP error codes on failure
+ */
+esp_err_t sd_card_init(void);
+
+
 /**
  * @brief Initialize and mount SD card
  *
@@ -63,6 +75,26 @@ sdmmc_card_t* sd_card_get_info(void);
  */
 const char* sd_card_get_mount_point(void);
 
+/**
+ * @brief Format SD card with FAT32 filesystem
+ *
+ * @return
+ *     - ESP_OK on success
+ *     - ESP error codes on failure
+ */
+esp_err_t sd_card_format(void);
+
+/**
+ * @brief Get SD card space information
+ *
+ * @param total_bytes Pointer to store total space in bytes
+ * @param used_bytes Pointer to store used space in bytes
+ * @return
+ *     - ESP_OK on success
+ *     - ESP error codes on failure
+ */
+esp_err_t sd_card_get_space_info(uint64_t *total_bytes, uint64_t *used_bytes);
+
 /* AT command handlers for SD card operations */
 uint8_t at_bnsd_mount_cmd_test(uint8_t *cmd_name);
 uint8_t at_bnsd_mount_cmd_query(uint8_t *cmd_name);
@@ -70,6 +102,12 @@ uint8_t at_bnsd_mount_cmd_exe(uint8_t *cmd_name);
 uint8_t at_bnsd_unmount_cmd_test(uint8_t *cmd_name);
 uint8_t at_bnsd_unmount_cmd_query(uint8_t *cmd_name);
 uint8_t at_bnsd_unmount_cmd_exe(uint8_t *cmd_name);
+uint8_t at_bnsd_format_cmd_test(uint8_t *cmd_name);
+uint8_t at_bnsd_format_cmd_query(uint8_t *cmd_name);
+uint8_t at_bnsd_format_cmd_exe(uint8_t *cmd_name);
+uint8_t at_bnsd_space_cmd_test(uint8_t *cmd_name);
+uint8_t at_bnsd_space_cmd_query(uint8_t *cmd_name);
+uint8_t at_bnsd_space_cmd_exe(uint8_t *cmd_name);
 
 #ifdef __cplusplus
 }
