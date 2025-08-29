@@ -833,7 +833,7 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
         at_uart_write_locked((const uint8_t*)"SEND FAIL\r\n", 11);
     }
     char e2[128];
-    int n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s (bytes %lu)\r\n",
+    n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s (bytes %lu)\r\n",
                      rc, curl_easy_strerror(rc), (unsigned long)ctx.total_bytes);
     at_uart_write_locked((uint8_t*)e2, n);
     
