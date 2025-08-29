@@ -26,6 +26,9 @@
 
 static const char *TAG = "at_curl";
 
+/* Global timeout setting for BNCURL operations (in seconds) */
+static uint32_t bncurl_timeout_seconds = BNCURL_TIMEOUT_DEFAULT_SECONDS; /* Default 30 seconds */
+
 
 /* ---- Extended CA bundle: multiple ROOT certs for common sites ---- */
 static const char CA_BUNDLE_PEM[] =
@@ -598,16 +601,27 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     
     /* Get content length for timeout calculation (only for GET requests) */
     uint64_t content_length = 0;
-    long timeout_ms = BNCURL_DEFAULT_TIMEOUT_MS; /* Default timeout */
+    long timeout_ms = bncurl_timeout_seconds * 1000L; /* Use user-configurable timeout */
     
     if (req->method == BNCURL_GET) {
         content_length = get_content_length(req->url);
-        timeout_ms = calculate_timeout_ms(content_length);
+        /* For GET requests, use the larger of: user timeout or calculated timeout for large files */
+        long calculated_timeout = calculate_timeout_ms(content_length);
+        timeout_ms = (calculated_timeout > timeout_ms) ? calculated_timeout : timeout_ms;
     } else if (req->method == BNCURL_HEAD) {
-        timeout_ms = BNCURL_HEAD_TIMEOUT_MS; /* 1 minute timeout for HEAD requests */
+        /* HEAD requests use user timeout (typically faster than user setting) */
+        /* But ensure minimum reasonable timeout for HEAD */
+        if (timeout_ms < 10000L) timeout_ms = 10000L; /* Min 10 seconds for HEAD */
     } else if (req->method == BNCURL_POST) {
-        timeout_ms = BNCURL_POST_TIMEOUT_MS; /* 5 minute timeout for POST requests */
+        /* POST requests use user timeout, but ensure reasonable minimum */
+        if (timeout_ms < 30000L) timeout_ms = 30000L; /* Min 30 seconds for POST */
     }
+    
+    /* Debug: show timeout being used */
+    char timeout_msg[64];
+    int n = snprintf(timeout_msg, sizeof(timeout_msg), "+BNCURL: Using timeout %lu ms (%.1f sec)\r\n", 
+                    timeout_ms, timeout_ms / 1000.0);
+    at_uart_write_locked((const uint8_t*)timeout_msg, n);
     
     CURL *h = curl_easy_init();
     if (!h) {
@@ -852,8 +866,8 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "  AT+BNCURL=POST,\"<url>\",<options>...        Perform HTTP POST with data upload\r\n"
         "Options:\r\n"
         "  -dd <filepath>   Save body to SD card file (auto-creates directories)\r\n"
-        "  -du <size>       Upload <size> bytes from UART for POST requests\r\n"
-        "  -du <filepath>   Upload file content for POST requests (@ prefix optional)\r\n"
+        "  -du <size>       Upload <size> bytes from UART (POST method only)\r\n"
+        "  -du <filepath>   Upload file content (POST method only, @ prefix optional)\r\n"
         "  -H <header>      Add custom HTTP header (up to 10 headers)\r\n"
         "  -v               Enable verbose mode (show detailed HTTP transaction)\r\n"
         "Examples:\r\n"
@@ -970,6 +984,12 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         } else if (strcasecmp((const char*)opt, "-du") == 0) {
             if (du_seen) {
                 const char *e = "+BNCURL: ERROR duplicate -du parameter\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            /* Validate that -du is only used with POST method */
+            if (method != BNCURL_POST) {
+                const char *e = "+BNCURL: ERROR -du parameter only valid with POST method\r\n";
                 at_uart_write_locked((const uint8_t*)e, strlen(e));
                 return ESP_AT_RESULT_CODE_ERROR;
             }
@@ -1187,13 +1207,6 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         }
     }
 
-    /* Validate POST upload parameters */
-    if (want_upload && method != BNCURL_POST) {
-        const char *e = "+BNCURL: ERROR -du parameter only valid with POST method\r\n";
-        at_uart_write_locked((const uint8_t*)e, strlen(e));
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
     bncurl_req_t *req = (bncurl_req_t*)calloc(1, sizeof(bncurl_req_t));
     if (!req) return ESP_AT_RESULT_CODE_ERROR;
     req->method = method;
@@ -1334,14 +1347,74 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
     return rc;
 }
 
+/* ======================= BNCURL_TIMEOUT Command ======================= */
+
+static uint8_t at_bncurl_timeout_cmd_test(uint8_t *cmd_name) {
+    const char *msg = 
+        "Usage:\r\n"
+        "  AT+BNCURL_TIMEOUT?                Query current timeout setting\r\n"
+        "  AT+BNCURL_TIMEOUT=<seconds>       Set timeout (1-1800 seconds)\r\n"
+        "Description:\r\n"
+        "  Set timeout for server reaction in seconds. Can be anything between 1 and 1800.\r\n"
+        "Examples:\r\n"
+        "  AT+BNCURL_TIMEOUT=100             Set timeout to 100 seconds\r\n"
+        "  AT+BNCURL_TIMEOUT?                Query current timeout\r\n"
+        "  Response: +BNCURL_TIMEOUT: 30     (Timeout is set to 30 seconds)\r\n";
+    at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_timeout_cmd_query(uint8_t *cmd_name) {
+    char out[64];
+    snprintf(out, sizeof(out), "+BNCURL_TIMEOUT: %lu\r\n", (unsigned long)bncurl_timeout_seconds);
+    at_uart_write_locked((uint8_t*)out, strlen(out));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_timeout_cmd_setup(uint8_t para_num) {
+    if (para_num != 1) {
+        const char *e = "+BNCURL_TIMEOUT: ERROR invalid parameter count\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    int32_t timeout_value = 0;
+    if (esp_at_get_para_as_digit(0, &timeout_value) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        const char *e = "+BNCURL_TIMEOUT: ERROR invalid parameter format (must be number)\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    /* Validate timeout range */
+    if (timeout_value < BNCURL_TIMEOUT_MIN_SECONDS || timeout_value > BNCURL_TIMEOUT_MAX_SECONDS) {
+        char err_msg[128];
+        int n = snprintf(err_msg, sizeof(err_msg), 
+                        "+BNCURL_TIMEOUT: ERROR timeout out of range (%d-%d seconds)\r\n",
+                        BNCURL_TIMEOUT_MIN_SECONDS, BNCURL_TIMEOUT_MAX_SECONDS);
+        at_uart_write_locked((const uint8_t*)err_msg, n);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    /* Set the new timeout value */
+    bncurl_timeout_seconds = (uint32_t)timeout_value;
+    
+    /* Confirm the setting */
+    char msg[64];
+    int n = snprintf(msg, sizeof(msg), "+BNCURL_TIMEOUT: %lu\r\n", (unsigned long)bncurl_timeout_seconds);
+    at_uart_write_locked((const uint8_t*)msg, n);
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 /* ----------------------- Command table & init ----------------------- */
 
 static const esp_at_cmd_struct at_custom_cmd[] = {
-    {"+BNSD_MOUNT",   at_bnsd_mount_cmd_test, at_bnsd_mount_cmd_query, NULL,             at_bnsd_mount_cmd_exe},
-    {"+BNSD_UNMOUNT", at_bnsd_unmount_cmd_test, at_bnsd_unmount_cmd_query, NULL,         at_bnsd_unmount_cmd_exe},
-    {"+BNSD_FORMAT",  at_bnsd_format_cmd_test, at_bnsd_format_cmd_query, NULL,           at_bnsd_format_cmd_exe},
-    {"+BNSD_SPACE",   at_bnsd_space_cmd_test, at_bnsd_space_cmd_query, NULL,             at_bnsd_space_cmd_exe},
-    {"+BNCURL",       at_bncurl_cmd_test,     at_bncurl_cmd_query,  at_bncurl_cmd_setup, at_bncurl_cmd_exe},
+    {"+BNSD_MOUNT",     at_bnsd_mount_cmd_test, at_bnsd_mount_cmd_query, NULL,             at_bnsd_mount_cmd_exe},
+    {"+BNSD_UNMOUNT",   at_bnsd_unmount_cmd_test, at_bnsd_unmount_cmd_query, NULL,         at_bnsd_unmount_cmd_exe},
+    {"+BNSD_FORMAT",    at_bnsd_format_cmd_test, at_bnsd_format_cmd_query, NULL,           at_bnsd_format_cmd_exe},
+    {"+BNSD_SPACE",     at_bnsd_space_cmd_test, at_bnsd_space_cmd_query, NULL,             at_bnsd_space_cmd_exe},
+    {"+BNCURL",         at_bncurl_cmd_test,     at_bncurl_cmd_query,  at_bncurl_cmd_setup, at_bncurl_cmd_exe},
+    {"+BNCURL_TIMEOUT", at_bncurl_timeout_cmd_test, at_bncurl_timeout_cmd_query, at_bncurl_timeout_cmd_setup, NULL},
     /* add further custom AT commands here */
 };
 

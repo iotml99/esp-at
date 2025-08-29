@@ -64,6 +64,11 @@ extern "C" {
 #define BNCURL_MIN_TIMEOUT_MS           300000L         /* Minimum timeout (5 minutes) */
 #define BNCURL_TIMEOUT_SAFETY_MARGIN    2               /* 2x safety margin for timeout calculations */
 
+/* BNCURL_TIMEOUT command limits */
+#define BNCURL_TIMEOUT_MIN_SECONDS      1               /* Minimum timeout setting (1 second) */
+#define BNCURL_TIMEOUT_MAX_SECONDS      1800            /* Maximum timeout setting (30 minutes) */
+#define BNCURL_TIMEOUT_DEFAULT_SECONDS  30              /* Default timeout setting (30 seconds) */
+
 #ifdef __cplusplus
 }
 #endif
