@@ -165,26 +165,40 @@ esp_err_t sd_card_format(void)
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
     
-    /* Mount with format option enabled */
+    /* Mount with format option enabled to initialize the card */
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,  /* This will format the card */
+        .format_if_mount_failed = true,
         .max_files = 5,
-        .allocation_unit_size = 16 * 1024
+        .allocation_unit_size = 64 * 1024  /* Use larger allocation unit for better performance */
     };
     
-    ESP_LOGI(TAG, "Formatting SD card...");
+    ESP_LOGI(TAG, "Initializing SD card for formatting...");
     ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &sd_card);
     
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to format SD card (%s)", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to initialize SD card for formatting (%s)", esp_err_to_name(ret));
         spi_bus_free(host.slot);
         spi_host_slot = -1;
         return ret;
     }
     
-    /* Format completed successfully */
     sd_mounted = true;
-    ESP_LOGI(TAG, "SD card formatted successfully");
+    ESP_LOGI(TAG, "Formatting SD card to FAT32...");
+    
+    /* Format the SD card using ESP-IDF function */
+    ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, sd_card);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to format SD card (%s)", esp_err_to_name(ret));
+        /* Cleanup on failure */
+        esp_vfs_fat_sdcard_unmount(MOUNT_POINT, sd_card);
+        spi_bus_free(host.slot);
+        spi_host_slot = -1;
+        sd_mounted = false;
+        sd_card = NULL;
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "SD card formatted successfully to FAT32");
     
     /* If it wasn't mounted before, unmount it after formatting */
     if (!was_mounted) {
