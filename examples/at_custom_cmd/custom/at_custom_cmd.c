@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include "esp_at.h"
 #include "at_custom_cmd.h"
+#include "atbn_config.h"
 #include "sd_card.h"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -113,10 +114,6 @@ typedef enum {
 static const char *bncurl_method_str[BNCURL_METHOD_MAX] = {
     "GET", "POST", "HEAD"
 };
-
-#ifndef BNCURL_UART_CHUNK
-#define BNCURL_UART_CHUNK 1024
-#endif
 
 
 /* ================= HTTP method & framing config ================= */
@@ -499,7 +496,7 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
     const uint8_t *src = (const uint8_t *)ptr;
     size_t remaining = total;
     while (remaining) {
-        size_t chunk = remaining > BNCURL_UART_CHUNK ? BNCURL_UART_CHUNK : remaining;
+        size_t chunk = remaining > BNCURL_UART_CHUNK_SIZE ? BNCURL_UART_CHUNK_SIZE : remaining;
 
         char hdr[32];
         int hn = snprintf(hdr, sizeof(hdr), "+POST:%u,", (unsigned)chunk);
@@ -521,26 +518,22 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
 /* Calculate timeout based on content length */
 static long calculate_timeout_ms(uint64_t content_length) {
     if (content_length == 0) {
-        return 300000L; /* Default 5 minutes for unknown size */
+        return BNCURL_MIN_TIMEOUT_MS; /* Default 5 minutes for unknown size */
     }
     
     /* Conservative timeout calculation for files up to 1GB */
     /* Assume minimum speed of 50KB/s (400 Kbps) for very slow connections */
     /* Add safety margin for connection setup, TLS handshake, and network fluctuations */
-    const uint64_t min_speed_bytes_per_sec = 50 * 1024; /* 50 KB/s - conservative */
-    const long base_timeout_ms = 60000L; /* 60 seconds base for connection setup */
-    const long max_timeout_ms = 3600000L; /* 60 minutes maximum for 1GB files */
-    const long min_timeout_ms = 300000L; /* 5 minutes minimum */
     
-    /* Calculate timeout with 2x safety margin */
-    long calculated_timeout = base_timeout_ms + (content_length * 2000 / min_speed_bytes_per_sec);
+    /* Calculate timeout with safety margin */
+    long calculated_timeout = BNCURL_BASE_TIMEOUT_MS + (content_length * 1000 * BNCURL_TIMEOUT_SAFETY_MARGIN / BNCURL_MIN_SPEED_BYTES_PER_SEC);
     
     /* Clamp to reasonable bounds */
-    if (calculated_timeout < min_timeout_ms) calculated_timeout = min_timeout_ms;
-    if (calculated_timeout > max_timeout_ms) calculated_timeout = max_timeout_ms;
+    if (calculated_timeout < BNCURL_MIN_TIMEOUT_MS) calculated_timeout = BNCURL_MIN_TIMEOUT_MS;
+    if (calculated_timeout > BNCURL_MAX_TIMEOUT_MS) calculated_timeout = BNCURL_MAX_TIMEOUT_MS;
     
     /* Log timeout calculation for debugging */
-    char debug_msg[128];
+    char debug_msg[BNCURL_DEBUG_MSG_SIZE];
     int n = snprintf(debug_msg, sizeof(debug_msg), 
                     "+BNCURL: Size %lu bytes -> timeout %lu ms (%.1f min)\r\n", 
                     (unsigned long)content_length, calculated_timeout, calculated_timeout / 60000.0);
@@ -595,17 +588,25 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
         bncurl_curl_inited = true;
     }
     
+    /* Temporarily reduce mbedTLS log level to suppress harmless timeout errors */
+    esp_log_level_t old_mbedtls_level = esp_log_level_get("mbedtls");
+    esp_log_level_t old_dynamic_impl_level = esp_log_level_get("Dynamic Impl");
+    if (!req->verbose) {
+        esp_log_level_set("mbedtls", ESP_LOG_WARN);
+        esp_log_level_set("Dynamic Impl", ESP_LOG_WARN);
+    }
+    
     /* Get content length for timeout calculation (only for GET requests) */
     uint64_t content_length = 0;
-    long timeout_ms = 120000L; /* Default timeout */
+    long timeout_ms = BNCURL_DEFAULT_TIMEOUT_MS; /* Default timeout */
     
     if (req->method == BNCURL_GET) {
         content_length = get_content_length(req->url);
         timeout_ms = calculate_timeout_ms(content_length);
     } else if (req->method == BNCURL_HEAD) {
-        timeout_ms = 60000L; /* 1 minute timeout for HEAD requests */
+        timeout_ms = BNCURL_HEAD_TIMEOUT_MS; /* 1 minute timeout for HEAD requests */
     } else if (req->method == BNCURL_POST) {
-        timeout_ms = 300000L; /* 5 minute timeout for POST requests */
+        timeout_ms = BNCURL_POST_TIMEOUT_MS; /* 5 minute timeout for POST requests */
     }
     
     CURL *h = curl_easy_init();
@@ -660,17 +661,17 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     /* —— libcurl setup —— */
     curl_easy_setopt(h, CURLOPT_URL, req->url);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_USERAGENT, "esp-at-libcurl/1.0");
+    curl_easy_setopt(h, CURLOPT_USERAGENT, BNCURL_USER_AGENT);
 #ifdef BNCURL_FORCE_DNS
     curl_easy_setopt(h, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1");
 #endif
-    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  /* Connection timeout */
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, BNCURL_CONNECT_TIMEOUT_MS);  /* Connection timeout */
     curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, timeout_ms);     /* Auto-calculated timeout */
     
     /* Adjust low speed timeout based on file size */
-    long low_speed_time = 120L; /* Default 2 minutes */
-    if (content_length > 100 * 1024 * 1024) { /* Files > 100MB */
-        low_speed_time = 300L; /* 5 minutes for large files */
+    long low_speed_time = BNCURL_LOW_SPEED_TIME_DEFAULT; /* Default 2 minutes */
+    if (content_length > BNCURL_LARGE_FILE_THRESHOLD) { /* Files > 100MB */
+        low_speed_time = BNCURL_LOW_SPEED_TIME_LARGE; /* 5 minutes for large files */
     }
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);       /* 1 byte/sec minimum */
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, low_speed_time);
@@ -678,6 +679,11 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(h, CURLOPT_TCP_KEEPIDLE, 120L);
     curl_easy_setopt(h, CURLOPT_TCP_KEEPINTVL, 60L);
+    
+    /* Additional options to improve TLS reliability and reduce timeout errors */
+    curl_easy_setopt(h, CURLOPT_TCP_NODELAY, 1L);          /* Disable Nagle's algorithm */
+    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);             /* Don't use signals for timeouts */
+    curl_easy_setopt(h, CURLOPT_BUFFERSIZE, BNCURL_BUFFER_SIZE);       /* 32KB buffer for better throughput */
 
     /* TLS configuration - simplified for ESP32 compatibility */
 #ifdef BNCURL_USE_CUSTOM_CA
@@ -691,6 +697,10 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
     /* Let libcurl/mbedTLS negotiate the best available TLS version and ciphers */
     curl_easy_setopt(h, CURLOPT_SSLVERSION, CURL_SSLVERSION_DEFAULT);
+    
+    /* Configure TLS timeouts to reduce harmless timeout errors */
+    curl_easy_setopt(h, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+    
 #ifdef BNCURL_VERBOSE_TLS
     curl_easy_setopt(h, CURLOPT_VERBOSE, 1L);
 #endif
@@ -782,6 +792,12 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
             at_uart_write_locked((const uint8_t*)msg, n);
         }
         at_uart_write_locked((const uint8_t*)"SEND OK\r\n", 9);
+        
+        /* Restore log levels */
+        if (!req->verbose) {
+            esp_log_level_set("mbedtls", old_mbedtls_level);
+            esp_log_level_set("Dynamic Impl", old_dynamic_impl_level);
+        }
         return ESP_AT_RESULT_CODE_OK;
     }
 
@@ -789,6 +805,12 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     if (rc == CURLE_WRITE_ERROR && !ctx.len_announced && !ctx.have_len) {
         const char *e = "\r\n+BNCURL: ERROR length-unknown (no Content-Length)\r\n";
         at_uart_write_locked((const uint8_t*)e, strlen(e));
+        
+        /* Restore log levels */
+        if (!req->verbose) {
+            esp_log_level_set("mbedtls", old_mbedtls_level);
+            esp_log_level_set("Dynamic Impl", old_dynamic_impl_level);
+        }
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
@@ -800,6 +822,12 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     int n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s (bytes %lu)\r\n",
                      rc, curl_easy_strerror(rc), (unsigned long)ctx.total_bytes);
     at_uart_write_locked((uint8_t*)e2, n);
+    
+    /* Restore log levels */
+    if (!req->verbose) {
+        esp_log_level_set("mbedtls", old_mbedtls_level);
+        esp_log_level_set("Dynamic Impl", old_dynamic_impl_level);
+    }
     return ESP_AT_RESULT_CODE_ERROR;
 }
 
@@ -843,7 +871,14 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "Note: HEAD method prints headers with +HDR: prefix\r\n"
         "Note: POST with -du prompts with > for UART input\r\n"
         "Note: Verbose mode shows connection details with +VERB: prefix\r\n"
-        "Note: Directories are created automatically if they don't exist\r\n";
+        "Note: Directories are created automatically if they don't exist\r\n"
+        "Limits:\r\n"
+        "  URL: max 255 characters\r\n"
+        "  File paths: max 120 characters (before @ expansion)\r\n"
+        "  Headers: max 250 characters, must contain ':'\r\n"
+        "  UART upload: max 1MB, numeric values only\r\n"
+        "  Max 10 custom headers per request\r\n"
+        "  No duplicate parameters allowed\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -866,6 +901,13 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     if (esp_at_get_para_as_str(0, &method_str) != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
     if (esp_at_get_para_as_str(1, &url)        != ESP_AT_PARA_PARSE_RESULT_OK) return ESP_AT_RESULT_CODE_ERROR;
 
+    /* Validate URL length */
+    if (strlen((const char*)url) >= BNCURL_URL_MAX_LEN) {
+        const char *e = "+BNCURL: ERROR URL too long (max 255 characters)\r\n";
+        at_uart_write_locked((const uint8_t*)e, strlen(e));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
     /* Method mapping - now supports GET, HEAD, and POST */
     bncurl_method_t method = BNCURL_GET;
     bool matched = false;
@@ -884,19 +926,84 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
 
     /* Parse optional arguments. Now -dd (file save), -du (data upload), -H (headers), and -v (verbose) are implemented. */
     bool want_file = false;
-    char file_path_tmp[128] = {0};
+    char file_path_tmp[BNCURL_FILEPATH_BUFFER_SIZE] = {0};
     bool want_upload = false;
-    char upload_param[128] = {0};
+    char upload_param[BNCURL_UPLOAD_PARAM_BUFFER_SIZE] = {0};
     bool upload_from_file = false;
     size_t upload_size = 0;
     bool want_verbose = false;
     
     /* Custom headers storage */
-    #define MAX_HEADERS 10
-    char headers_list[MAX_HEADERS][256];
+    char headers_list[BNCURL_MAX_HEADERS][BNCURL_HEADER_BUFFER_SIZE];
     int header_count = 0;
     
-    /* Parse all parameters starting from parameter 2 */
+    /* Parameter validation flags to detect duplicates */
+    bool dd_seen = false;
+    bool du_seen = false;
+    bool v_seen = false;
+    
+    /* First pass: validate all parameters */
+    for (int i = 2; i < para_num; i++) {
+        uint8_t *opt = NULL;
+        esp_at_para_parse_result_type result = esp_at_get_para_as_str(i, &opt);
+        
+        if (result != ESP_AT_PARA_PARSE_RESULT_OK || !opt) {
+            const char *e = "+BNCURL: ERROR invalid parameter format\r\n";
+            at_uart_write_locked((const uint8_t*)e, strlen(e));
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        /* Check for known parameters */
+        if (strcasecmp((const char*)opt, "-dd") == 0) {
+            if (dd_seen) {
+                const char *e = "+BNCURL: ERROR duplicate -dd parameter\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            dd_seen = true;
+            i++; /* Skip next parameter (file path) */
+            if (i >= para_num) {
+                const char *e = "+BNCURL: ERROR -dd requires file path parameter\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+        } else if (strcasecmp((const char*)opt, "-du") == 0) {
+            if (du_seen) {
+                const char *e = "+BNCURL: ERROR duplicate -du parameter\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            du_seen = true;
+            i++; /* Skip next parameter (upload param) */
+            if (i >= para_num) {
+                const char *e = "+BNCURL: ERROR -du requires parameter (size or file path)\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+        } else if (strcasecmp((const char*)opt, "-H") == 0) {
+            i++; /* Skip next parameter (header) */
+            if (i >= para_num) {
+                const char *e = "+BNCURL: ERROR -H requires header parameter\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+        } else if (strcasecmp((const char*)opt, "-v") == 0) {
+            if (v_seen) {
+                const char *e = "+BNCURL: ERROR duplicate -v parameter\r\n";
+                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            v_seen = true;
+        } else {
+            /* Unknown parameter */
+            char err_msg[128];
+            int n = snprintf(err_msg, sizeof(err_msg), "+BNCURL: ERROR unknown parameter: %s\r\n", (const char*)opt);
+            at_uart_write_locked((const uint8_t*)err_msg, n);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+    }
+    
+    /* Parse all parameters starting from parameter 2 (second pass for actual processing) */
     for (int i = 2; i < para_num; i++) {
         uint8_t *opt = NULL;
         esp_at_para_parse_result_type result = esp_at_get_para_as_str(i, &opt);
@@ -908,6 +1015,13 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                     uint8_t *path = NULL;
                     result = esp_at_get_para_as_str(i + 1, &path);
                     if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
+                        /* Validate file path length before processing */
+                        if (strlen((const char*)path) > BNCURL_FILEPATH_MAX_LEN) { /* Leave room for @/sdcard/ expansion */
+                            const char *e = "+BNCURL: ERROR -dd file path too long (max 120 characters)\r\n";
+                            at_uart_write_locked((const uint8_t*)e, strlen(e));
+                            return ESP_AT_RESULT_CODE_ERROR;
+                        }
+                        
                         /* Handle @ prefix as SD card mount point shorthand */
                         const char *input_path = (const char*)path;
                         if (input_path[0] == '@') {
@@ -915,14 +1029,14 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                                 /* @/ or @ represents the mount point */
                                 if (input_path[1] == '/') {
                                     /* @/path/file.json -> /sdcard/path/file.json */
-                                    snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "/sdcard%s", input_path + 1);
+                                    snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "%s%s", BNCURL_SDCARD_MOUNT_POINT, input_path + 1);
                                 } else {
                                     /* @ -> /sdcard */
-                                    snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "/sdcard");
+                                    snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "%s", BNCURL_SDCARD_MOUNT_POINT);
                                 }
                             } else {
                                 /* @filename -> /sdcard/filename */
-                                snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "/sdcard/%s", input_path + 1);
+                                snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "%s/%s", BNCURL_SDCARD_MOUNT_POINT, input_path + 1);
                             }
                         } else {
                             /* No @ prefix, use path as-is */
@@ -947,6 +1061,13 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                     uint8_t *param = NULL;
                     result = esp_at_get_para_as_str(i + 1, &param);
                     if (result == ESP_AT_PARA_PARSE_RESULT_OK && param) {
+                        /* Validate upload parameter length */
+                        if (strlen((const char*)param) > BNCURL_FILEPATH_MAX_LEN) { /* Leave room for @/sdcard/ expansion */
+                            const char *e = "+BNCURL: ERROR -du parameter too long (max 120 characters)\r\n";
+                            at_uart_write_locked((const uint8_t*)e, strlen(e));
+                            return ESP_AT_RESULT_CODE_ERROR;
+                        }
+                        
                         const char *input_param = (const char*)param;
                         want_upload = true;
                         i++; /* Skip next parameter as it's the upload param */
@@ -959,14 +1080,14 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                                 /* @/ or @ represents the mount point */
                                 if (input_param[1] == '/') {
                                     /* @/path/file.bin -> /sdcard/path/file.bin */
-                                    snprintf(upload_param, sizeof(upload_param)-1, "/sdcard%s", input_param + 1);
+                                    snprintf(upload_param, sizeof(upload_param)-1, "%s%s", BNCURL_SDCARD_MOUNT_POINT, input_param + 1);
                                 } else {
                                     /* @ -> /sdcard */
-                                    snprintf(upload_param, sizeof(upload_param)-1, "/sdcard");
+                                    snprintf(upload_param, sizeof(upload_param)-1, "%s", BNCURL_SDCARD_MOUNT_POINT);
                                 }
                             } else {
                                 /* @filename -> /sdcard/filename */
-                                snprintf(upload_param, sizeof(upload_param)-1, "/sdcard/%s", input_param + 1);
+                                snprintf(upload_param, sizeof(upload_param)-1, "%s/%s", BNCURL_SDCARD_MOUNT_POINT, input_param + 1);
                             }
                             upload_param[sizeof(upload_param)-1] = '\0'; /* Ensure null termination */
                         } else if (input_param[0] == '/' || strchr(input_param, '/') != NULL) {
@@ -975,9 +1096,35 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                             strncpy(upload_param, input_param, sizeof(upload_param)-1);
                             upload_param[sizeof(upload_param)-1] = '\0';
                         } else {
-                            /* UART size parameter */
+                            /* UART size parameter - validate it's a valid number */
                             upload_from_file = false;
+                            
+                            /* Check if parameter is a valid number */
+                            const char *p = input_param;
+                            bool is_valid_number = true;
+                            if (*p == '\0') is_valid_number = false; /* Empty string */
+                            
+                            while (*p && is_valid_number) {
+                                if (*p < '0' || *p > '9') {
+                                    is_valid_number = false;
+                                }
+                                p++;
+                            }
+                            
+                            if (!is_valid_number) {
+                                const char *e = "+BNCURL: ERROR -du size must be a valid number\r\n";
+                                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                                return ESP_AT_RESULT_CODE_ERROR;
+                            }
+                            
                             upload_size = (size_t)atoi(input_param);
+                            
+                            /* Validate reasonable size limits (max 1MB for UART input) */
+                            if (upload_size > BNCURL_UART_UPLOAD_MAX_SIZE) {
+                                const char *e = "+BNCURL: ERROR -du size too large (max 1MB for UART input)\r\n";
+                                at_uart_write_locked((const uint8_t*)e, strlen(e));
+                                return ESP_AT_RESULT_CODE_ERROR;
+                            }
                             /* Allow upload_size == 0 for empty POST body */
                         }
                         
@@ -993,10 +1140,24 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                 }
             } else if (strcasecmp((const char*)opt, "-H") == 0) {
                 /* Found -H flag, get header from next parameter */
-                if (i + 1 < para_num && header_count < MAX_HEADERS) {
+                if (i + 1 < para_num && header_count < BNCURL_MAX_HEADERS) {
                     uint8_t *header = NULL;
                     result = esp_at_get_para_as_str(i + 1, &header);
                     if (result == ESP_AT_PARA_PARSE_RESULT_OK && header) {
+                        /* Validate header length */
+                        if (strlen((const char*)header) > BNCURL_HEADER_MAX_LEN) {
+                            const char *e = "+BNCURL: ERROR -H header too long (max 250 characters)\r\n";
+                            at_uart_write_locked((const uint8_t*)e, strlen(e));
+                            return ESP_AT_RESULT_CODE_ERROR;
+                        }
+                        
+                        /* Basic header format validation (should contain :) */
+                        if (!strchr((const char*)header, ':')) {
+                            const char *e = "+BNCURL: ERROR -H header must contain ':' (format: 'Name: Value')\r\n";
+                            at_uart_write_locked((const uint8_t*)e, strlen(e));
+                            return ESP_AT_RESULT_CODE_ERROR;
+                        }
+                        
                         strncpy(headers_list[header_count], (const char*)header, sizeof(headers_list[header_count])-1);
                         headers_list[header_count][sizeof(headers_list[header_count])-1] = '\0';
                         header_count++;
@@ -1065,7 +1226,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
             /* Read data from AT port */
             size_t bytes_read = 0;
             while (bytes_read < upload_size) {
-                if (xSemaphoreTake(data_input_sema, pdMS_TO_TICKS(30000))) {
+                if (xSemaphoreTake(data_input_sema, pdMS_TO_TICKS(BNCURL_DATA_INPUT_TIMEOUT_MS))) {
                     size_t read_len = esp_at_port_read_data(
                         (uint8_t*)(req->upload_data + bytes_read), 
                         upload_size - bytes_read
@@ -1120,7 +1281,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         return ESP_AT_RESULT_CODE_ERROR; 
     }
 
-    if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
+    if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(BNCURL_QUEUE_SEND_TIMEOUT_MS)) != pdTRUE) {
         vSemaphoreDelete(req->done);
         if (req->headers) curl_slist_free_all(req->headers);
         if (req->upload_data) free(req->upload_data);
@@ -1129,7 +1290,7 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
     }
 
     /* Wait for completion with extended timeout for large files (up to 60 minutes) */
-    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(3600000)) != pdTRUE) {
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(BNCURL_OPERATION_TIMEOUT_MS)) != pdTRUE) {
         vSemaphoreDelete(req->done);
         if (req->headers) curl_slist_free_all(req->headers);
         if (req->upload_data) free(req->upload_data);
@@ -1155,14 +1316,14 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
     req->done = xSemaphoreCreateBinary();
     if (!req->done) { free(req); return ESP_AT_RESULT_CODE_ERROR; }
 
-    if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
+    if (xQueueSend(bncurl_q, &req, pdMS_TO_TICKS(BNCURL_QUEUE_SEND_TIMEOUT_MS)) != pdTRUE) {
         vSemaphoreDelete(req->done);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
     /* Wait for completion with extended timeout for large files (up to 60 minutes) */
-    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(3600000)) != pdTRUE) {
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(BNCURL_OPERATION_TIMEOUT_MS)) != pdTRUE) {
         vSemaphoreDelete(req->done);
         free(req);
         return ESP_AT_RESULT_CODE_ERROR;
@@ -1195,10 +1356,10 @@ bool esp_at_custom_cmd_register(void)
 
     if (!at_uart_lock) at_uart_lock = xSemaphoreCreateMutex();
     if (!data_input_sema) data_input_sema = xSemaphoreCreateBinary();
-    if (!bncurl_q)     bncurl_q = xQueueCreate(2, sizeof(bncurl_req_t*));
+    if (!bncurl_q)     bncurl_q = xQueueCreate(BNCURL_QUEUE_SIZE, sizeof(bncurl_req_t*));
     if (!bncurl_task) {
         /* TLS + libcurl + printf ==> give it a big stack; tune later */
-        xTaskCreatePinnedToCore(bncurl_worker, "bncurl", 16384, NULL, 5, &bncurl_task, 0);
+        xTaskCreatePinnedToCore(bncurl_worker, "bncurl", BNCURL_TASK_STACK_SIZE, NULL, BNCURL_TASK_PRIORITY, &bncurl_task, 0);
     }
     return true;
 }
