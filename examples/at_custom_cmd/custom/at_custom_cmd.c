@@ -29,6 +29,10 @@ static const char *TAG = "at_curl";
 /* Global timeout setting for BNCURL operations (in seconds) */
 static uint32_t bncurl_timeout_seconds = BNCURL_TIMEOUT_DEFAULT_SECONDS; /* Default 30 seconds */
 
+/* Global variables for operation control */
+static bool      bncurl_operation_running = false;  /* Track if operation is active */
+static bool      bncurl_stop_requested = false;     /* Signal to stop current operation */
+
 
 /* ---- Extended CA bundle: multiple ROOT certs for common sites ---- */
 static const char CA_BUNDLE_PEM[] =
@@ -432,6 +436,23 @@ static int bncurl_debug_callback(CURL *handle, curl_infotype type, char *data, s
     return 0;
 }
 
+/* ================= Progress callback for stop detection ================= */
+static int bncurl_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    (void)clientp; /* Unused */
+    (void)dltotal; /* Unused */
+    (void)dlnow;   /* Unused */
+    (void)ultotal; /* Unused */
+    (void)ulnow;   /* Unused */
+    
+    /* Check if stop was requested */
+    if (bncurl_stop_requested) {
+        ESP_LOGI(TAG, "BNCURL operation stopped by user request");
+        return 1; /* Non-zero return value aborts the transfer */
+    }
+    
+    return 0; /* Continue transfer */
+}
+
 static size_t bncurl_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
     size_t total = size * nitems;
     bncurl_ctx_t *ctx = (bncurl_ctx_t *)userdata;
@@ -521,10 +542,10 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
 /* Calculate timeout based on content length */
 static long calculate_timeout_ms(uint64_t content_length) {
     if (content_length == 0) {
-        return BNCURL_MIN_TIMEOUT_MS; /* Default 5 minutes for unknown size */
+        return 60000L; /* 1 minute for unknown size */
     }
     
-    /* Conservative timeout calculation for files up to 1GB */
+    /* Calculate timeout for large files only (>10MB) */
     /* Assume minimum speed of 50KB/s (400 Kbps) for very slow connections */
     /* Add safety margin for connection setup, TLS handshake, and network fluctuations */
     
@@ -532,7 +553,7 @@ static long calculate_timeout_ms(uint64_t content_length) {
     long calculated_timeout = BNCURL_BASE_TIMEOUT_MS + (content_length * 1000 * BNCURL_TIMEOUT_SAFETY_MARGIN / BNCURL_MIN_SPEED_BYTES_PER_SEC);
     
     /* Clamp to reasonable bounds */
-    if (calculated_timeout < BNCURL_MIN_TIMEOUT_MS) calculated_timeout = BNCURL_MIN_TIMEOUT_MS;
+    if (calculated_timeout < 60000L) calculated_timeout = 60000L; /* Min 1 minute for large files */
     if (calculated_timeout > BNCURL_MAX_TIMEOUT_MS) calculated_timeout = BNCURL_MAX_TIMEOUT_MS;
     
     /* Log timeout calculation for debugging */
@@ -605,16 +626,23 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     
     if (req->method == BNCURL_GET) {
         content_length = get_content_length(req->url);
-        /* For GET requests, use the larger of: user timeout or calculated timeout for large files */
-        long calculated_timeout = calculate_timeout_ms(content_length);
-        timeout_ms = (calculated_timeout > timeout_ms) ? calculated_timeout : timeout_ms;
+        /* For GET requests, only extend timeout if content is very large and user timeout is insufficient */
+        /* Calculate minimum time needed for large files (>10MB) at slow speeds */
+        if (content_length > (10 * 1024 * 1024)) { /* Files larger than 10MB */
+            long calculated_timeout = calculate_timeout_ms(content_length);
+            if (calculated_timeout > timeout_ms) {
+                timeout_ms = calculated_timeout;
+                ESP_LOGI(TAG, "Extended timeout to %ld ms for large file (%llu bytes)", timeout_ms, content_length);
+            }
+        }
+        /* For small files, always respect user timeout */
     } else if (req->method == BNCURL_HEAD) {
         /* HEAD requests use user timeout (typically faster than user setting) */
         /* But ensure minimum reasonable timeout for HEAD */
-        if (timeout_ms < 10000L) timeout_ms = 10000L; /* Min 10 seconds for HEAD */
+        if (timeout_ms < 5000L) timeout_ms = 5000L; /* Min 5 seconds for HEAD */
     } else if (req->method == BNCURL_POST) {
         /* POST requests use user timeout, but ensure reasonable minimum */
-        if (timeout_ms < 30000L) timeout_ms = 30000L; /* Min 30 seconds for POST */
+        if (timeout_ms < 10000L) timeout_ms = 10000L; /* Min 10 seconds for POST */
     }
     
     /* Debug: show timeout being used */
@@ -731,6 +759,11 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
         at_uart_write_locked((const uint8_t*)verbose_msg, strlen(verbose_msg));
     }
 
+    /* Progress callback for stop detection */
+    curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);            /* Enable progress */
+    curl_easy_setopt(h, CURLOPT_PROGRESSFUNCTION, bncurl_progress_callback);
+    curl_easy_setopt(h, CURLOPT_PROGRESSDATA, req);
+
     /* Headers & body handling for spec framing */
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "identity"); /* avoid gzip changing lengths */
     
@@ -832,6 +865,20 @@ static uint8_t bncurl_perform_internal(bncurl_req_t *req) {
     if (ctx.len_announced) {
         at_uart_write_locked((const uint8_t*)"SEND FAIL\r\n", 11);
     }
+    
+    /* Check if operation was stopped by user request */
+    if (rc == CURLE_ABORTED_BY_CALLBACK && bncurl_stop_requested) {
+        const char *stop_msg = "+BNCURL: Operation stopped by user\r\n";
+        at_uart_write_locked((const uint8_t*)stop_msg, strlen(stop_msg));
+        
+        /* Restore log levels */
+        if (!req->verbose) {
+            esp_log_level_set("mbedtls", old_mbedtls_level);
+            esp_log_level_set("Dynamic Impl", old_dynamic_impl_level);
+        }
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
     char e2[128];
     n = snprintf(e2, sizeof(e2), "+BNCURL: ERROR %d %s (bytes %lu)\r\n",
                      rc, curl_easy_strerror(rc), (unsigned long)ctx.total_bytes);
@@ -849,7 +896,17 @@ static void bncurl_worker(void *arg) {
     for (;;) {
         bncurl_req_t *req_ptr = NULL;
         if (xQueueReceive(bncurl_q, &req_ptr, portMAX_DELAY) == pdTRUE && req_ptr) {
+            /* Set operation running flags */
+            bncurl_operation_running = true;
+            bncurl_stop_requested = false;
+            
+            /* Perform the request */
             req_ptr->result_code = bncurl_perform_internal(req_ptr);
+            
+            /* Clear operation running flag */
+            bncurl_operation_running = false;
+            bncurl_stop_requested = false;
+            
             if (req_ptr->done) xSemaphoreGive(req_ptr->done);
         }
     }
@@ -886,6 +943,11 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "Note: POST with -du prompts with > for UART input\r\n"
         "Note: Verbose mode shows connection details with +VERB: prefix\r\n"
         "Note: Directories are created automatically if they don't exist\r\n"
+        "Control Commands:\r\n"
+        "  AT+BNCURL_STOP?                               Query if BNCURL operation is running\r\n"
+        "  AT+BNCURL_STOP                                Stop current download/upload operation\r\n"
+        "  AT+BNCURL_TIMEOUT?                            Query current timeout setting\r\n"
+        "  AT+BNCURL_TIMEOUT=<seconds>                   Set timeout (1-1800 seconds)\r\n"
         "Limits:\r\n"
         "  URL: max 255 characters\r\n"
         "  File paths: max 120 characters (before @ expansion)\r\n"
@@ -1406,6 +1468,50 @@ static uint8_t at_bncurl_timeout_cmd_setup(uint8_t para_num) {
     return ESP_AT_RESULT_CODE_OK;
 }
 
+/* ================= AT+BNCURL_STOP command implementation ================= */
+
+static uint8_t at_bncurl_stop_cmd_test(uint8_t *cmd_name) {
+    const char *msg =
+        "Usage:\r\n"
+        "  AT+BNCURL_STOP?    Query whether a BNCURL operation is currently running\r\n"
+        "  AT+BNCURL_STOP     Stop the current BNCURL download/upload operation\r\n"
+        "Response:\r\n"
+        "  +BNCURL_STOP:      (operation stopped successfully)\r\n"
+        "  OK                 \r\n"
+        "  or\r\n"
+        "  +BNCURL_STOP:      \r\n"
+        "  ERROR              (no operation running or stop failed)\r\n"
+        "Note: This command only works during active file download/upload operations\r\n";
+    at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_stop_cmd_query(uint8_t *cmd_name) {
+    char msg[64];
+    int n = snprintf(msg, sizeof(msg), "+BNCURL_STOP: %s\r\n", 
+                    bncurl_operation_running ? "RUNNING" : "IDLE");
+    at_uart_write_locked((const uint8_t*)msg, n);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_stop_cmd_exe(uint8_t *cmd_name) {
+    /* Check if there is an operation to stop */
+    if (!bncurl_operation_running) {
+        const char *err_msg = "+BNCURL_STOP: \r\n";
+        at_uart_write_locked((const uint8_t*)err_msg, strlen(err_msg));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    /* Signal the operation to stop */
+    bncurl_stop_requested = true;
+    
+    /* Confirm stop request initiated */
+    const char *ok_msg = "+BNCURL_STOP: \r\n";
+    at_uart_write_locked((const uint8_t*)ok_msg, strlen(ok_msg));
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 /* ----------------------- Command table & init ----------------------- */
 
 static const esp_at_cmd_struct at_custom_cmd[] = {
@@ -1415,6 +1521,7 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNSD_SPACE",     at_bnsd_space_cmd_test, at_bnsd_space_cmd_query, NULL,             at_bnsd_space_cmd_exe},
     {"+BNCURL",         at_bncurl_cmd_test,     at_bncurl_cmd_query,  at_bncurl_cmd_setup, at_bncurl_cmd_exe},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_cmd_test, at_bncurl_timeout_cmd_query, at_bncurl_timeout_cmd_setup, NULL},
+    {"+BNCURL_STOP",    at_bncurl_stop_cmd_test, at_bncurl_stop_cmd_query, NULL,          at_bncurl_stop_cmd_exe},
     /* add further custom AT commands here */
 };
 
