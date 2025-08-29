@@ -121,54 +121,7 @@ static const char *bncurl_method_str[BNCURL_METHOD_MAX] = {
 
 /* ================= HTTP method & framing config ================= */
 
-static uint8_t at_test_cmd_test(uint8_t *cmd_name)
-{
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "test command: <AT%s=?> is executed\r\n", cmd_name);
-    esp_at_port_write_data(buffer, strlen((char *)buffer));
-    return ESP_AT_RESULT_CODE_OK;
-}
 
-static uint8_t at_query_cmd_test(uint8_t *cmd_name)
-{
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "query command: <AT%s?> is executed\r\n", cmd_name);
-    esp_at_port_write_data(buffer, strlen((char *)buffer));
-    return ESP_AT_RESULT_CODE_OK;
-}
-
-static uint8_t at_setup_cmd_test(uint8_t para_num)
-{
-    uint8_t index = 0;
-
-    int32_t digit = 0;
-    if (esp_at_get_para_as_digit(index++, &digit) != ESP_AT_PARA_PARSE_RESULT_OK) {
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    uint8_t *str = NULL;
-    if (esp_at_get_para_as_str(index++, &str) != ESP_AT_PARA_PARSE_RESULT_OK) {
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    uint8_t *buffer = (uint8_t *)malloc(512);
-    if (!buffer) {
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-    int len = snprintf((char *)buffer, 512, "setup command: <AT%s=%d,\"%s\"> is executed\r\n",
-                       esp_at_get_current_cmd_name(), digit, str);
-    esp_at_port_write_data(buffer, len);
-    free(buffer);
-    return ESP_AT_RESULT_CODE_OK;
-}
-
-static uint8_t at_exe_cmd_test(uint8_t *cmd_name)
-{
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "execute command: <AT%s> is executed\r\n", cmd_name);
-    esp_at_port_write_data(buffer, strlen((char *)buffer));
-    return ESP_AT_RESULT_CODE_OK;
-}
 
 /* ========================= +BNCURL (blocking, safe) ========================= */
 
@@ -955,7 +908,27 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                     uint8_t *path = NULL;
                     result = esp_at_get_para_as_str(i + 1, &path);
                     if (result == ESP_AT_PARA_PARSE_RESULT_OK && path) {
-                        strncpy(file_path_tmp, (const char*)path, sizeof(file_path_tmp)-1);
+                        /* Handle @ prefix as SD card mount point shorthand */
+                        const char *input_path = (const char*)path;
+                        if (input_path[0] == '@') {
+                            if (input_path[1] == '/' || input_path[1] == '\0') {
+                                /* @/ or @ represents the mount point */
+                                if (input_path[1] == '/') {
+                                    /* @/path/file.json -> /sdcard/path/file.json */
+                                    snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "/sdcard%s", input_path + 1);
+                                } else {
+                                    /* @ -> /sdcard */
+                                    snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "/sdcard");
+                                }
+                            } else {
+                                /* @filename -> /sdcard/filename */
+                                snprintf(file_path_tmp, sizeof(file_path_tmp)-1, "/sdcard/%s", input_path + 1);
+                            }
+                        } else {
+                            /* No @ prefix, use path as-is */
+                            strncpy(file_path_tmp, input_path, sizeof(file_path_tmp)-1);
+                        }
+                        file_path_tmp[sizeof(file_path_tmp)-1] = '\0'; /* Ensure null termination */
                         want_file = true;
                         i++; /* Skip next parameter as it's the path */
                         
@@ -974,22 +947,37 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
                     uint8_t *param = NULL;
                     result = esp_at_get_para_as_str(i + 1, &param);
                     if (result == ESP_AT_PARA_PARSE_RESULT_OK && param) {
-                        strncpy(upload_param, (const char*)param, sizeof(upload_param)-1);
+                        const char *input_param = (const char*)param;
                         want_upload = true;
                         i++; /* Skip next parameter as it's the upload param */
                         
                         /* Check if it's a file path (starts with @ or is a path) */
-                        if (upload_param[0] == '@') {
-                            /* File upload - remove @ prefix */
+                        if (input_param[0] == '@') {
+                            /* File upload - handle @ as mount point shorthand */
                             upload_from_file = true;
-                            memmove(upload_param, upload_param + 1, strlen(upload_param));
-                        } else if (upload_param[0] == '/' || strchr(upload_param, '/') != NULL) {
+                            if (input_param[1] == '/' || input_param[1] == '\0') {
+                                /* @/ or @ represents the mount point */
+                                if (input_param[1] == '/') {
+                                    /* @/path/file.bin -> /sdcard/path/file.bin */
+                                    snprintf(upload_param, sizeof(upload_param)-1, "/sdcard%s", input_param + 1);
+                                } else {
+                                    /* @ -> /sdcard */
+                                    snprintf(upload_param, sizeof(upload_param)-1, "/sdcard");
+                                }
+                            } else {
+                                /* @filename -> /sdcard/filename */
+                                snprintf(upload_param, sizeof(upload_param)-1, "/sdcard/%s", input_param + 1);
+                            }
+                            upload_param[sizeof(upload_param)-1] = '\0'; /* Ensure null termination */
+                        } else if (input_param[0] == '/' || strchr(input_param, '/') != NULL) {
                             /* File path without @ prefix */
                             upload_from_file = true;
+                            strncpy(upload_param, input_param, sizeof(upload_param)-1);
+                            upload_param[sizeof(upload_param)-1] = '\0';
                         } else {
                             /* UART size parameter */
                             upload_from_file = false;
-                            upload_size = (size_t)atoi(upload_param);
+                            upload_size = (size_t)atoi(input_param);
                             /* Allow upload_size == 0 for empty POST body */
                         }
                         
@@ -1188,7 +1176,6 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
 /* ----------------------- Command table & init ----------------------- */
 
 static const esp_at_cmd_struct at_custom_cmd[] = {
-    {"+TEST",         at_test_cmd_test,       at_query_cmd_test,    at_setup_cmd_test,   at_exe_cmd_test},
     {"+BNSD_MOUNT",   at_bnsd_mount_cmd_test, at_bnsd_mount_cmd_query, NULL,             at_bnsd_mount_cmd_exe},
     {"+BNSD_UNMOUNT", at_bnsd_unmount_cmd_test, at_bnsd_unmount_cmd_query, NULL,         at_bnsd_unmount_cmd_exe},
     {"+BNSD_FORMAT",  at_bnsd_format_cmd_test, at_bnsd_format_cmd_query, NULL,           at_bnsd_format_cmd_exe},
