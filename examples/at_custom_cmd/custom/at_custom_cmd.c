@@ -33,6 +33,11 @@ static uint32_t bncurl_timeout_seconds = BNCURL_TIMEOUT_DEFAULT_SECONDS; /* Defa
 static bool      bncurl_operation_running = false;  /* Track if operation is active */
 static bool      bncurl_stop_requested = false;     /* Signal to stop current operation */
 
+/* Global variables for progress tracking */
+static uint64_t  bncurl_progress_current = 0;       /* Current bytes transferred */
+static uint64_t  bncurl_progress_total = 0;         /* Total bytes to transfer */
+static bool      bncurl_progress_file_transfer = false; /* True if file transfer active */
+
 
 /* ---- Extended CA bundle: multiple ROOT certs for common sites ---- */
 static const char CA_BUNDLE_PEM[] =
@@ -322,6 +327,12 @@ static size_t bncurl_read_callback(void *buffer, size_t size, size_t nitems, voi
         
         size_t read_size = fread(buffer, 1, max_read, fp);
         fclose(fp);
+        
+        /* Update global progress for file uploads */
+        if (bncurl_progress_file_transfer && read_size > 0) {
+            bncurl_progress_current += read_size;
+        }
+        
         return read_size;
     } else {
         /* Memory buffer upload (UART input) */
@@ -334,6 +345,9 @@ static size_t bncurl_read_callback(void *buffer, size_t size, size_t nitems, voi
         
         memcpy(buffer, req->upload_data + req->upload_read_pos, to_copy);
         req->upload_read_pos += to_copy;
+        
+        /* Update global progress for UART uploads (not file transfers) */
+        /* UART uploads don't count as file transfers for progress tracking */
         
         return to_copy;
     }
@@ -439,10 +453,19 @@ static int bncurl_debug_callback(CURL *handle, curl_infotype type, char *data, s
 /* ================= Progress callback for stop detection ================= */
 static int bncurl_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     (void)clientp; /* Unused */
-    (void)dltotal; /* Unused */
-    (void)dlnow;   /* Unused */
-    (void)ultotal; /* Unused */
-    (void)ulnow;   /* Unused */
+    
+    /* Update global progress tracking for file transfers */
+    if (bncurl_progress_file_transfer) {
+        if (dltotal > 0 && dlnow >= 0) {
+            /* Download progress */
+            bncurl_progress_total = (uint64_t)dltotal;
+            bncurl_progress_current = (uint64_t)dlnow;
+        } else if (ultotal > 0 && ulnow >= 0) {
+            /* Upload progress */
+            bncurl_progress_total = (uint64_t)ultotal;
+            bncurl_progress_current = (uint64_t)ulnow;
+        }
+    }
     
     /* Check if stop was requested */
     if (bncurl_stop_requested) {
@@ -497,6 +520,15 @@ static size_t bncurl_sink_framed(void *ptr, size_t size, size_t nmemb, void *use
             return 0; /* Signal error to curl */
         }
         ctx->total_bytes += written;
+        
+        /* Update global progress for file transfers */
+        if (bncurl_progress_file_transfer) {
+            bncurl_progress_current = ctx->total_bytes;
+            if (ctx->have_len && bncurl_progress_total == 0) {
+                bncurl_progress_total = ctx->content_length;
+            }
+        }
+        
         return total;
     }
 
@@ -900,14 +932,32 @@ static void bncurl_worker(void *arg) {
             bncurl_operation_running = true;
             bncurl_stop_requested = false;
             
+            /* Initialize progress tracking */
+            bncurl_progress_current = 0;
+            bncurl_progress_total = 0;
+            bncurl_progress_file_transfer = (req_ptr->save_to_file || req_ptr->upload_from_file);
+            
             /* Perform the request */
             req_ptr->result_code = bncurl_perform_internal(req_ptr);
             
-            /* Clear operation running flag */
+            /* Clear operation running flag and progress */
             bncurl_operation_running = false;
             bncurl_stop_requested = false;
+            bncurl_progress_file_transfer = false;
+            bncurl_progress_current = 0;
+            bncurl_progress_total = 0;
             
-            if (req_ptr->done) xSemaphoreGive(req_ptr->done);
+            /* Clean up request resources */
+            if (req_ptr->done) {
+                vSemaphoreDelete(req_ptr->done);
+            }
+            if (req_ptr->headers) {
+                curl_slist_free_all(req_ptr->headers);
+            }
+            if (req_ptr->upload_data) {
+                free(req_ptr->upload_data);
+            }
+            free(req_ptr);
         }
     }
 }
@@ -946,6 +996,7 @@ static uint8_t at_bncurl_cmd_test(uint8_t *cmd_name) {
         "Control Commands:\r\n"
         "  AT+BNCURL_STOP?                               Query if BNCURL operation is running\r\n"
         "  AT+BNCURL_STOP                                Stop current download/upload operation\r\n"
+        "  AT+BNCURL_PROG?                               Query progress of file transfer operations\r\n"
         "  AT+BNCURL_TIMEOUT?                            Query current timeout setting\r\n"
         "  AT+BNCURL_TIMEOUT=<seconds>                   Set timeout (1-1800 seconds)\r\n"
         "Limits:\r\n"
@@ -968,6 +1019,13 @@ static uint8_t at_bncurl_cmd_query(uint8_t *cmd_name) {
 }
 
 static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
+    /* Check if another BNCURL operation is already running */
+    if (bncurl_operation_running) {
+        const char *busy_msg = "+BNCURL: ERROR operation already in progress\r\n";
+        at_uart_write_locked((const uint8_t*)busy_msg, strlen(busy_msg));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
     /* Expect: AT+BNCURL=GET,"<url>",[options...] */
     if (para_num < 2 || !bncurl_q) return ESP_AT_RESULT_CODE_ERROR;
 
@@ -1285,6 +1343,14 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         req->upload_from_file = upload_from_file;
         if (upload_from_file) {
             strncpy(req->upload_path, upload_param, sizeof(req->upload_path)-1);
+            
+            /* Get file size for progress tracking */
+            struct stat st;
+            if (stat(req->upload_path, &st) == 0) {
+                /* Initialize progress for file upload */
+                bncurl_progress_total = (uint64_t)st.st_size;
+                bncurl_progress_current = 0;
+            }
         } else {
             /* UART input - read data using ESP-AT mechanism */
             req->upload_expected = upload_size;
@@ -1364,23 +1430,19 @@ static uint8_t at_bncurl_cmd_setup(uint8_t para_num) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Wait for completion with extended timeout for large files (up to 60 minutes) */
-    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(BNCURL_OPERATION_TIMEOUT_MS)) != pdTRUE) {
-        vSemaphoreDelete(req->done);
-        if (req->headers) curl_slist_free_all(req->headers);
-        if (req->upload_data) free(req->upload_data);
-        free(req);
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-    uint8_t rc = req->result_code;
-    vSemaphoreDelete(req->done);
-    if (req->headers) curl_slist_free_all(req->headers);
-    if (req->upload_data) free(req->upload_data);
-    free(req);
-    return rc;
+    /* Return immediately - operation runs in background */
+    /* Note: req and req->done will be cleaned up by worker task */
+    return ESP_AT_RESULT_CODE_OK;
 }
 
 static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
+    /* Check if another BNCURL operation is already running */
+    if (bncurl_operation_running) {
+        const char *busy_msg = "+BNCURL: ERROR operation already in progress\r\n";
+        at_uart_write_locked((const uint8_t*)busy_msg, strlen(busy_msg));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
     if (!bncurl_q) return ESP_AT_RESULT_CODE_ERROR;
 
     bncurl_req_t *req = (bncurl_req_t*)calloc(1, sizeof(bncurl_req_t));
@@ -1397,16 +1459,9 @@ static uint8_t at_bncurl_cmd_exe(uint8_t *cmd_name) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Wait for completion with extended timeout for large files (up to 60 minutes) */
-    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(BNCURL_OPERATION_TIMEOUT_MS)) != pdTRUE) {
-        vSemaphoreDelete(req->done);
-        free(req);
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-    uint8_t rc = req->result_code;
-    vSemaphoreDelete(req->done);
-    free(req);
-    return rc;
+    /* Return immediately - operation runs in background */
+    /* Note: req and req->done will be cleaned up by worker task */
+    return ESP_AT_RESULT_CODE_OK;
 }
 
 /* ======================= BNCURL_TIMEOUT Command ======================= */
@@ -1476,12 +1531,13 @@ static uint8_t at_bncurl_stop_cmd_test(uint8_t *cmd_name) {
         "  AT+BNCURL_STOP?    Query whether a BNCURL operation is currently running\r\n"
         "  AT+BNCURL_STOP     Stop the current BNCURL download/upload operation\r\n"
         "Response:\r\n"
-        "  +BNCURL_STOP:      (operation stopped successfully)\r\n"
-        "  OK                 \r\n"
+        "  +BNCURL_STOP:      (operation stopped successfully or no operation running)\r\n"
+        "  OK                 (stop successful or no operation to stop)\r\n"
         "  or\r\n"
         "  +BNCURL_STOP:      \r\n"
-        "  ERROR              (no operation running or stop failed)\r\n"
-        "Note: This command only works during active file download/upload operations\r\n";
+        "  ERROR              (stop failed)\r\n"
+        "Note: This command only works during active file download/upload operations\r\n"
+        "Note: Query shows RUNNING or IDLE status\r\n";
     at_uart_write_locked((const uint8_t*)msg, strlen(msg));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -1495,19 +1551,68 @@ static uint8_t at_bncurl_stop_cmd_query(uint8_t *cmd_name) {
 }
 
 static uint8_t at_bncurl_stop_cmd_exe(uint8_t *cmd_name) {
+    /* Always return +BNCURL_STOP: with empty content, then OK or ERROR */
+    const char *response_msg = "+BNCURL_STOP: \r\n";
+    at_uart_write_locked((const uint8_t*)response_msg, strlen(response_msg));
+    
     /* Check if there is an operation to stop */
     if (!bncurl_operation_running) {
-        const char *err_msg = "+BNCURL_STOP: \r\n";
-        at_uart_write_locked((const uint8_t*)err_msg, strlen(err_msg));
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
     /* Signal the operation to stop */
     bncurl_stop_requested = true;
     
-    /* Confirm stop request initiated */
-    const char *ok_msg = "+BNCURL_STOP: \r\n";
-    at_uart_write_locked((const uint8_t*)ok_msg, strlen(ok_msg));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* ================= AT+BNCURL_PROG command implementation ================= */
+
+static uint8_t at_bncurl_prog_cmd_test(uint8_t *cmd_name) {
+    const char *msg =
+        "Usage:\r\n"
+        "  AT+BNCURL_PROG?    Query progress of current file download/upload operation\r\n"
+        "Response:\r\n"
+        "  +BNCURL_PROG: <current>/<total>   (bytes transferred / total bytes)\r\n"
+        "  OK                                \r\n"
+        "  or\r\n"
+        "  +BNCURL_PROG: IDLE                (no file transfer operation running)\r\n"
+        "  OK                                \r\n"
+        "  or\r\n"
+        "  +BNCURL_PROG: UART                (operation outputs to UART, not file)\r\n"
+        "  OK                                \r\n"
+        "Note: This command only shows progress for file transfers (download with -dd\r\n"
+        "      or upload with -du file). UART transfers are not tracked since the host\r\n"
+        "      can count received bytes directly.\r\n";
+    at_uart_write_locked((const uint8_t*)msg, strlen(msg));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_prog_cmd_query(uint8_t *cmd_name) {
+    char msg[64];
+    
+    if (!bncurl_operation_running) {
+        /* No operation running */
+        int n = snprintf(msg, sizeof(msg), "+BNCURL_PROG: IDLE\r\n");
+        at_uart_write_locked((const uint8_t*)msg, n);
+    } else if (!bncurl_progress_file_transfer) {
+        /* Operation running but not a file transfer */
+        int n = snprintf(msg, sizeof(msg), "+BNCURL_PROG: UART\r\n");
+        at_uart_write_locked((const uint8_t*)msg, n);
+    } else {
+        /* File transfer in progress */
+        if (bncurl_progress_total > 0) {
+            int n = snprintf(msg, sizeof(msg), "+BNCURL_PROG: %llu/%llu\r\n", 
+                           (unsigned long long)bncurl_progress_current, 
+                           (unsigned long long)bncurl_progress_total);
+            at_uart_write_locked((const uint8_t*)msg, n);
+        } else {
+            /* File transfer but total unknown */
+            int n = snprintf(msg, sizeof(msg), "+BNCURL_PROG: %llu/?\r\n", 
+                           (unsigned long long)bncurl_progress_current);
+            at_uart_write_locked((const uint8_t*)msg, n);
+        }
+    }
     
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -1522,6 +1627,7 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL",         at_bncurl_cmd_test,     at_bncurl_cmd_query,  at_bncurl_cmd_setup, at_bncurl_cmd_exe},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_cmd_test, at_bncurl_timeout_cmd_query, at_bncurl_timeout_cmd_setup, NULL},
     {"+BNCURL_STOP",    at_bncurl_stop_cmd_test, at_bncurl_stop_cmd_query, NULL,          at_bncurl_stop_cmd_exe},
+    {"+BNCURL_PROG",    at_bncurl_prog_cmd_test, at_bncurl_prog_cmd_query, NULL,          NULL},
     /* add further custom AT commands here */
 };
 
