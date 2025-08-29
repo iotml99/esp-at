@@ -1,0 +1,34 @@
+# BNWPS Configuration
+menu "BNWPS Configuration"
+
+    config BNWPS_ENABLE
+        bool "Enable BNWPS AT command support"
+        default y
+        depends on ESP_WIFI_ENABLED
+        help
+            Enable AT+BNWPS command for WPS (Wi-Fi Protected Setup) control.
+            Provides commands to start WPS Push Button Configuration (PBC) sessions
+            with timeout control, query WPS state, and cancel active sessions.
+
+    config BNWPS_MAX_DURATION
+        int "Maximum WPS session duration (seconds)"
+        default 120
+        range 30 300
+        depends on BNWPS_ENABLE
+        help
+            Maximum allowed duration for WPS sessions in seconds.
+            Sessions will automatically timeout after this duration.
+            Valid range: 30-300 seconds.
+
+    config BNWPS_ALLOW_RECONNECT
+        bool "Allow WPS when already connected"
+        default n
+        depends on BNWPS_ENABLE
+        help
+            When enabled, AT+BNWPS will disconnect from current AP before starting WPS.
+            When disabled, AT+BNWPS will return error if already connected to an AP.
+            
+            Enable this option if you want to allow switching networks via WPS.
+            Disable this option for more conservative behavior that protects existing connections.
+
+endmenu
