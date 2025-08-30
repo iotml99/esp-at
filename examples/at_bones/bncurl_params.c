@@ -8,8 +8,16 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/errno.h>
+#include <unistd.h>
+#include <dirent.h>
 #include "esp_at.h"
+#include "esp_log.h"
 #include "bncurl_params.h"
+#include "at_sd.h"
+
+static const char *TAG = "BNCURL_PARAMS";
 
 // Function to print parsed parameters
 static void print_bncurl_params(const bncurl_params_t *params)
@@ -61,6 +69,188 @@ static bool is_valid_url(const char *url)
     // Must start with http:// or https://
     return (strncmp(url, "http://", 7) == 0 || 
             strncmp(url, "https://", 8) == 0);
+}
+
+// Function to validate file exists for reading (cookie send files)
+static bool validate_file_exists_for_reading(const char *file_path)
+{
+    if (!file_path || strlen(file_path) == 0) {
+        return true; // No file path specified, nothing to validate
+    }
+    
+    struct stat file_stat;
+    if (stat(file_path, &file_stat) != 0) {
+        ESP_LOGE(TAG, "File does not exist for reading: %s", file_path);
+        printf("ERROR: File does not exist: %s\n", file_path);
+        return false;
+    }
+    
+    if (!S_ISREG(file_stat.st_mode)) {
+        ESP_LOGE(TAG, "Path is not a regular file: %s", file_path);
+        printf("ERROR: Path is not a file: %s\n", file_path);
+        return false;
+    }
+    
+    // Test if file can be opened for reading
+    FILE *test_fp = fopen(file_path, "r");
+    if (!test_fp) {
+        ESP_LOGE(TAG, "Cannot open file for reading: %s", file_path);
+        printf("ERROR: Cannot open file for reading: %s\n", file_path);
+        return false;
+    }
+    
+    fclose(test_fp);
+    ESP_LOGI(TAG, "File validation successful for reading: %s", file_path);
+    return true;
+}
+
+// Function to validate and prepare file path for download
+static bool validate_and_prepare_download_path(const char *file_path)
+{
+    if (!file_path || strlen(file_path) == 0) {
+        return true; // No file path specified, nothing to validate
+    }
+    
+    // Extract directory path from file path
+    char dir_path[BNCURL_MAX_FILE_PATH_LENGTH + 1];
+    strncpy(dir_path, file_path, sizeof(dir_path) - 1);
+    dir_path[sizeof(dir_path) - 1] = '\0';
+    
+    // Find the last '/' to separate directory from filename
+    char *last_slash = strrchr(dir_path, '/');
+    if (last_slash != NULL) {
+        *last_slash = '\0'; // Terminate string at last slash to get directory path
+        
+        // Use at_sd_mkdir_recursive to create directory
+        if (!at_sd_mkdir_recursive(dir_path)) {
+            ESP_LOGE(TAG, "Failed to create directory for file: %s", file_path);
+            printf("ERROR: Failed to create directory for file: %s\n", file_path);
+            return false;
+        }
+    }
+    
+    // Check if file already exists (it will be overwritten)
+    struct stat file_stat;
+    if (stat(file_path, &file_stat) == 0) {
+        ESP_LOGI(TAG, "File %s already exists and will be overwritten", file_path);
+        printf("INFO: File %s exists and will be overwritten\n", file_path);
+    }
+    
+    // Check disk space by trying to create a test file
+    char test_file[BNCURL_MAX_FILE_PATH_LENGTH + 20];
+    snprintf(test_file, sizeof(test_file), "%s.tmp_space_test", file_path);
+    
+    FILE *test_fp = fopen(test_file, "w");
+    if (!test_fp) {
+        ESP_LOGE(TAG, "Cannot create file %s: %s", file_path, strerror(errno));
+        printf("ERROR: Cannot create file %s: insufficient disk space or permission denied\n", file_path);
+        return false;
+    }
+    
+    fclose(test_fp);
+    unlink(test_file); // Remove test file
+    
+    ESP_LOGI(TAG, "File path validation successful: %s", file_path);
+    return true;
+}
+
+// Function to validate SD card paths and prepare file operations
+static bool validate_and_prepare_sd_file_operations(const bncurl_params_t *params)
+{
+    bool has_sd_file_paths = false;
+    
+    // Check if any SD card file paths are specified
+    if (strlen(params->data_download) > 0 && strncmp(params->data_download, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        has_sd_file_paths = true;
+    }
+    if (strlen(params->data_upload) > 0 && strncmp(params->data_upload, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        has_sd_file_paths = true;
+    }
+    if (strlen(params->cookie_save) > 0 && strncmp(params->cookie_save, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        has_sd_file_paths = true;
+    }
+    if (strlen(params->cookie_send) > 0 && strncmp(params->cookie_send, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        has_sd_file_paths = true;
+    }
+    
+    // If SD card file paths are specified, SD card must be mounted
+    if (has_sd_file_paths) {
+        if (!at_sd_is_mounted()) {
+            ESP_LOGE(TAG, "SD card is not mounted but file paths are specified");
+            printf("ERROR: SD card must be mounted to use @ file paths\n");
+            return false;
+        }
+        ESP_LOGI(TAG, "SD card validation passed for file operations");
+    } else {
+        // No SD card paths, validation passed
+        return true;
+    }
+    
+    // Validate and prepare download file path if specified
+    if (strlen(params->data_download) > 0 && strncmp(params->data_download, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        if (!validate_and_prepare_download_path(params->data_download)) {
+            return false;
+        }
+    }
+    
+    // Validate and prepare cookie save file path if specified
+    if (strlen(params->cookie_save) > 0 && strncmp(params->cookie_save, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        if (!validate_and_prepare_download_path(params->cookie_save)) {
+            return false;
+        }
+    }
+    
+    // Validate cookie send file exists if specified
+    if (strlen(params->cookie_send) > 0 && strncmp(params->cookie_send, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        if (!validate_file_exists_for_reading(params->cookie_send)) {
+            return false;
+        }
+    }
+    
+    // Validate data upload file exists if it's a file path (starts with mount point)
+    if (strlen(params->data_upload) > 0 && strncmp(params->data_upload, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+        if (!validate_file_exists_for_reading(params->data_upload)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Function to normalize path by replacing @ prefix with mount point
+static void normalize_path_with_mount_point(char *path, size_t max_length)
+{
+    if (!path || strlen(path) == 0) {
+        return;
+    }
+    
+    // Handle paths starting with @/ or @
+    if (path[0] == '@') {
+        char temp_path[BNCURL_MAX_FILE_PATH_LENGTH + 1];
+        char *relative_path;
+        
+        // Skip the @ character
+        if (path[1] == '/') {
+            // @/Downloads -> /MOUNT_POINT/Downloads
+            relative_path = &path[2];
+        } else {
+            // @Downloads -> /MOUNT_POINT/Downloads
+            relative_path = &path[1];
+        }
+        
+        // Build the full path with mount point
+        int result = snprintf(temp_path, sizeof(temp_path), "%s/%s", 
+                             BNCURL_SD_MOUNT_POINT, relative_path);
+        
+        if (result >= 0 && result < sizeof(temp_path) && strlen(temp_path) <= max_length) {
+            strcpy(path, temp_path);
+            ESP_LOGI(TAG, "Normalized path with mount point: %s", path);
+            printf("INFO: Normalized path with mount point: %s\n", path);
+        } else {
+            ESP_LOGE(TAG, "Path too long after mount point substitution");
+            printf("ERROR: Path too long after mount point substitution\n");
+        }
+    }
 }
 
 // Function to validate parameter combinations
@@ -203,13 +393,18 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
+            char *upload_str = (char *)param_str;
+            
             // Copy data upload parameter with length validation
-            if (strlen((char *)param_str) > BNCURL_MAX_PARAMETER_LENGTH) {
+            if (strlen(upload_str) > BNCURL_MAX_PARAMETER_LENGTH) {
                 printf("ERROR: Data upload parameter too long. Max length: %d\n", BNCURL_MAX_PARAMETER_LENGTH);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
-            strncpy(params->data_upload, (char *)param_str, BNCURL_MAX_PARAMETER_LENGTH);
+            strncpy(params->data_upload, upload_str, BNCURL_MAX_PARAMETER_LENGTH);
             params->data_upload[BNCURL_MAX_PARAMETER_LENGTH] = '\0';
+            
+            // Normalize path if it starts with @ (for file uploads)
+            normalize_path_with_mount_point(params->data_upload, BNCURL_MAX_PARAMETER_LENGTH);
             
         } else if (strcmp(option, "-dd") == 0) {
             // Data download option
@@ -230,12 +425,6 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             
             char *path_str = (char *)param_str;
             
-            // Handle @ prefix normalization
-            if (path_str[0] == '@') {
-                path_str++; // Skip the @ character
-                printf("INFO: Normalized -dd path (removed @ prefix)\n");
-            }
-            
             // Copy data download path with length validation
             if (strlen(path_str) > BNCURL_MAX_FILE_PATH_LENGTH) {
                 printf("ERROR: File path too long. Max length: %d\n", BNCURL_MAX_FILE_PATH_LENGTH);
@@ -243,6 +432,9 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             }
             strncpy(params->data_download, path_str, BNCURL_MAX_FILE_PATH_LENGTH);
             params->data_download[BNCURL_MAX_FILE_PATH_LENGTH] = '\0';
+            
+            // Normalize path if it starts with @ prefix
+            normalize_path_with_mount_point(params->data_download, BNCURL_MAX_FILE_PATH_LENGTH);
             
         } else if (strcmp(option, "-c") == 0) {
             // Cookie save option
@@ -269,6 +461,9 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             strncpy(params->cookie_save, (char *)param_str, BNCURL_MAX_COOKIE_FILE_PATH);
             params->cookie_save[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
+            // Normalize path if it starts with @ prefix
+            normalize_path_with_mount_point(params->cookie_save, BNCURL_MAX_COOKIE_FILE_PATH);
+            
         } else if (strcmp(option, "-b") == 0) {
             // Cookie send option
             if (strlen(params->cookie_send) > 0) {
@@ -293,6 +488,9 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             }
             strncpy(params->cookie_send, (char *)param_str, BNCURL_MAX_COOKIE_FILE_PATH);
             params->cookie_send[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
+            
+            // Normalize path if it starts with @ prefix
+            normalize_path_with_mount_point(params->cookie_send, BNCURL_MAX_COOKIE_FILE_PATH);
             
         } else if (strcmp(option, "-r") == 0) {
             // Range option
@@ -331,6 +529,11 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
     
     // Validate parameter combinations
     if (!validate_param_combinations(params)) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Validate SD card file operations (combined check for mount status and file preparation)
+    if (!validate_and_prepare_sd_file_operations(params)) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
     

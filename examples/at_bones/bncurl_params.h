@@ -35,20 +35,43 @@ typedef struct {
  * 
  * This function parses the parameters of an AT+BNCURL command and prints
  * them in a structured format. It validates the parameter combinations
- * according to the BNCURL specification.
+ * according to the BNCURL specification and performs comprehensive file
+ * system validation.
  * 
  * Supported parameters:
  * - method: GET, POST, HEAD
  * - url: HTTP/HTTPS URL
  * - -H: HTTP headers (can appear multiple times)
- * - -du: Data upload (number of bytes or @file)
- * - -dd: Data download (file path, @ prefix normalized)
- * - -c: Cookie save file
- * - -b: Cookie send file  
+ * - -du: Data upload (number of bytes or @file path with mount point substitution)
+ * - -dd: Data download (file path with @ prefix mount point substitution)
+ * - -c: Cookie save file (with @ prefix mount point substitution)
+ * - -b: Cookie send file (with @ prefix mount point substitution)
  * - -r: Range (start-end)
  * - -v: Verbose mode flag
  * 
+ * Path Normalization:
+ * - Paths starting with "@/" are converted to "/mount_point/"
+ * - Paths starting with "@" are converted to "/mount_point/"
+ * - Example: "@Downloads" → "/sdcard/Downloads"
+ * - Example: "@/Downloads" → "/sdcard/Downloads"
+ * 
+ * File System Validation:
+ * - SD card mount status is checked when @ paths are used
+ * - Directories are created recursively if they don't exist
+ * - Download files: directories created, existing files will be overwritten
+ * - Upload/cookie files: validated to exist and be readable
+ * - Disk space is validated before file operations
+ * - Returns error if SD card not mounted when @ paths specified
+ * 
+ * Error Conditions:
+ * - SD card not mounted when using @ file paths
+ * - Cannot create required directories
+ * - Insufficient disk space for downloads
+ * - Upload/cookie files don't exist or aren't readable
+ * - File path length exceeds maximum limits
+ * 
  * @param para_num Number of parameters in the AT command
+ * @param params Pointer to bncurl_params_t structure to fill
  * @return ESP_AT_RESULT_CODE_OK on success, ESP_AT_RESULT_CODE_ERROR on failure
  */
 uint8_t bncurl_parse_and_print_params(uint8_t para_num, bncurl_params_t *params);

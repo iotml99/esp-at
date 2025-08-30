@@ -45,9 +45,10 @@ size_t bncurl_common_write_callback(void *contents, size_t size, size_t nmemb, v
         if (active_buf->size >= BNCURL_STREAM_BUFFER_SIZE) {
             active_buf->is_full = true;
             
-            // Stream this buffer to UART
-            if (!bncurl_stream_buffer_to_uart(common_ctx->stream, common_ctx->stream->active_buffer)) {
-                ESP_LOGE(TAG, "Failed to stream buffer to UART");
+            // Stream this buffer to output (file or UART)
+            if (!bncurl_stream_buffer_to_output(common_ctx->stream, 
+                                               common_ctx->stream->active_buffer)) {
+                ESP_LOGE(TAG, "Failed to stream buffer to output");
                 return 0; // Abort on error
             }
             
@@ -197,7 +198,7 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
             if (strcmp(method, "HEAD") != 0) {
                 bncurl_stream_buffer_t *active_buf = &stream->buffers[stream->active_buffer];
                 if (active_buf->size > 0) {
-                    bncurl_stream_buffer_to_uart(stream, stream->active_buffer);
+                    bncurl_stream_buffer_to_output(stream, stream->active_buffer);
                 }
             }
             

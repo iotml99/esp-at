@@ -13,6 +13,7 @@
 #include "bncurl.h"
 #include "bncurl_config.h"
 #include "bncurl_executor.h"
+#include "at_sd.h"
 
 
 static bncurl_context_t *bncurl_ctx = NULL;
@@ -188,17 +189,129 @@ static uint8_t at_bncurl_prog_query(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+// SD Card command implementations
+static uint8_t at_bnsd_mount_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    snprintf((char *)buffer, 128, 
+        "AT+BNSD_MOUNT[=<mount_point>]\r\n"
+        "Mount SD card at specified mount point (default: /sdcard)\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_mount_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    
+    if (at_sd_is_mounted()) {
+        const char *mount_point = at_sd_get_mount_point();
+        snprintf((char *)buffer, 128, "+BNSD_MOUNT:1,\"%s\"\r\n", mount_point ? mount_point : "/sdcard");
+    } else {
+        snprintf((char *)buffer, 128, "+BNSD_MOUNT:0\r\n");
+    }
+    
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_mount_setup(uint8_t para_num)
+{
+    uint8_t *mount_point = NULL;
+    
+    if (para_num > 1) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (para_num == 1) {
+        if (esp_at_get_para_as_str(0, &mount_point) != ESP_AT_PARA_PARSE_RESULT_OK) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+    }
+    
+    bool success = at_sd_mount((const char *)mount_point);
+    return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+}
+
+static uint8_t at_bnsd_mount_exe(uint8_t *cmd_name)
+{
+    bool success = at_sd_mount(NULL);
+    return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+}
+
+static uint8_t at_bnsd_unmount_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    snprintf((char *)buffer, 64, "AT+BNSD_UNMOUNT\r\nUnmount SD card\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_unmount_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    at_sd_status_t status = at_sd_get_status();
+    snprintf((char *)buffer, 64, "+BNSD_UNMOUNT:%d\r\n", (int)status);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_unmount_exe(uint8_t *cmd_name)
+{
+    bool success = at_sd_unmount();
+    return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+}
+
+static uint8_t at_bnsd_space_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    snprintf((char *)buffer, 128, 
+        "AT+BNSD_SPACE?\r\n"
+        "Get SD card space information (total, used, free bytes)\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_space_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[256] = {0};
+    at_sd_info_t info;
+    
+    if (!at_sd_get_space_info(&info)) {
+        snprintf((char *)buffer, 256, "+BNSD_SPACE:ERROR\r\n");
+    } else {
+        // Return values in MB for readability
+        uint32_t total_mb = (uint32_t)(info.total_bytes / (1024 * 1024));
+        uint32_t used_mb = (uint32_t)(info.used_bytes / (1024 * 1024));
+        uint32_t free_mb = (uint32_t)(info.free_bytes / (1024 * 1024));
+        
+        snprintf((char *)buffer, 256, "+BNSD_SPACE:%u,%u,%u\r\n", total_mb, used_mb, free_mb);
+    }
+    
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
     {"+BNCURL_STOP", NULL, at_bncurl_stop_query, NULL, NULL},
-    {"+BNCURL_PROG", NULL, at_bncurl_prog_query, NULL, NULL}
+    {"+BNCURL_PROG", NULL, at_bncurl_prog_query, NULL, NULL},
+    {"+BNSD_MOUNT", at_bnsd_mount_test, at_bnsd_mount_query, at_bnsd_mount_setup, at_bnsd_mount_exe},
+    {"+BNSD_UNMOUNT", at_bnsd_unmount_test, at_bnsd_unmount_query, NULL, at_bnsd_unmount_exe},
+    {"+BNSD_SPACE", at_bnsd_space_test, at_bnsd_space_query, NULL, NULL},
 };
 
 bool esp_at_custom_cmd_register(void)
 {
     // Initialize the executor first
     if (!bncurl_executor_init()) {
+        return false;
+    }
+    
+    // Initialize SD card module
+    if (!at_sd_init()) {
+        bncurl_executor_deinit();
         return false;
     }
     

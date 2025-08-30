@@ -8,6 +8,7 @@
 #define BNCURL_METHODS_H
 
 #include <stdbool.h>
+#include <stdio.h>
 #include "bncurl.h"
 
 // Buffer configuration for dual-buffer streaming
@@ -29,6 +30,8 @@ typedef struct {
     int streaming_buffer;   // Currently streaming buffer (-1 if none)
     size_t total_size;      // Total content size (if known)
     size_t bytes_streamed;  // Total bytes already streamed
+    FILE *output_file;      // File handle for download (NULL for UART output)
+    char *file_path;        // Path to output file (NULL for UART output)
 } bncurl_stream_context_t;
 
 /**
@@ -59,17 +62,18 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx);
  * @brief Initialize streaming context
  * 
  * @param stream_ctx Streaming context to initialize
+ * @param ctx BNCURL context containing download file path (optional)
  */
-void bncurl_stream_init(bncurl_stream_context_t *stream_ctx);
+void bncurl_stream_init(bncurl_stream_context_t *stream_ctx, bncurl_context_t *ctx);
 
 /**
- * @brief Stream buffer data to UART
+ * @brief Stream buffer data to output (UART or file)
  * 
  * @param stream_ctx Streaming context
  * @param buffer_index Buffer index to stream (0 or 1)
  * @return true on success, false on failure
  */
-bool bncurl_stream_buffer_to_uart(bncurl_stream_context_t *stream_ctx, int buffer_index);
+bool bncurl_stream_buffer_to_output(bncurl_stream_context_t *stream_ctx, int buffer_index);
 
 /**
  * @brief Finalize streaming and send completion message

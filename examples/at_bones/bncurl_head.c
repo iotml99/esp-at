@@ -25,9 +25,9 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx)
     
     ESP_LOGI(TAG, "Starting HEAD request to: %s", ctx->params.url);
     
-    // Initialize streaming context (though HEAD won't use it for data)
+    // Initialize streaming context with context for file path (though HEAD won't use it for data)
     bncurl_stream_context_t stream;
-    bncurl_stream_init(&stream);
+    bncurl_stream_init(&stream, ctx);
     
     // Use common functionality for HEAD request
     bool success = bncurl_common_execute_request(ctx, &stream, "HEAD");
