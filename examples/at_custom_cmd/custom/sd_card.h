@@ -95,6 +95,17 @@ esp_err_t sd_card_format(void);
  */
 esp_err_t sd_card_get_space_info(uint64_t *total_bytes, uint64_t *used_bytes);
 
+/**
+ * @brief Create directory recursively on SD card
+ *
+ * @param path Full path to create directories for (including filename)
+ * @return
+ *     - ESP_OK on success
+ *     - ESP_ERR_INVALID_ARG if path is NULL
+ *     - ESP_FAIL on filesystem errors
+ */
+esp_err_t sd_card_create_directory_recursive(const char *path);
+
 /* AT command handlers for SD card operations */
 uint8_t at_bnsd_mount_cmd_test(uint8_t *cmd_name);
 uint8_t at_bnsd_mount_cmd_query(uint8_t *cmd_name);

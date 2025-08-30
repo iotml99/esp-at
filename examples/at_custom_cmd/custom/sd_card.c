@@ -258,6 +258,61 @@ esp_err_t sd_card_get_space_info(uint64_t *total_bytes, uint64_t *used_bytes)
     return ESP_OK;
 }
 
+esp_err_t sd_card_create_directory_recursive(const char *path)
+{
+    if (!path) return ESP_ERR_INVALID_ARG;
+    
+    char temp_path[256];
+    strncpy(temp_path, path, sizeof(temp_path) - 1);
+    temp_path[sizeof(temp_path) - 1] = '\0';
+    
+    /* Remove filename from path to get directory */
+    char *last_slash = strrchr(temp_path, '/');
+    if (!last_slash) return ESP_OK; /* No directory separator found */
+    
+    *last_slash = '\0'; /* Terminate at last slash to get directory path */
+    
+    /* Check if directory already exists */
+    struct stat st = {0};
+    if (stat(temp_path, &st) == 0) {
+        return ESP_OK; /* Directory already exists */
+    }
+    
+    /* Log directory creation for debugging */
+    ESP_LOGI(TAG, "Creating directory: %s", temp_path);
+    
+    /* Notify user that directories will be created */
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg), "+BNCURL: Creating directory: %s\r\n", temp_path);
+    esp_at_port_write_data((uint8_t*)msg, n);
+    
+    /* Create parent directories first */
+    char *pos = temp_path + 1; /* Skip leading slash */
+    while ((pos = strchr(pos, '/')) != NULL) {
+        *pos = '\0';
+        
+        if (stat(temp_path, &st) != 0) {
+            if (mkdir(temp_path, 0755) != 0) {
+                ESP_LOGE(TAG, "Failed to create directory: %s", temp_path);
+                return ESP_FAIL;
+            }
+        }
+        
+        *pos = '/';
+        pos++;
+    }
+    
+    /* Create the final directory */
+    if (stat(temp_path, &st) != 0) {
+        if (mkdir(temp_path, 0755) != 0) {
+            ESP_LOGE(TAG, "Failed to create directory: %s", temp_path);
+            return ESP_FAIL;
+        }
+    }
+    
+    return ESP_OK;
+}
+
 /* AT command handlers */
 uint8_t at_bnsd_mount_cmd_test(uint8_t *cmd_name)
 {
