@@ -54,6 +54,13 @@ extern "C" {
 #define BNCURL_OPERATION_TIMEOUT_MS     3600000         /* Maximum operation timeout (60 minutes) */
 #define BNCURL_DATA_INPUT_TIMEOUT_MS    30000           /* Data input timeout (30 seconds) */
 
+/* Cookie limits */
+#define BNCURL_MAX_COOKIES              5               /* Maximum number of cookie files per request */
+#define BNCURL_COOKIE_BUFFER_SIZE       128             /* Cookie file path buffer size */
+
+/* Range limits */
+#define BNCURL_RANGE_BUFFER_SIZE        32              /* Range specification buffer size */
+
 /* User agent string */
 #define BNCURL_USER_AGENT               "esp-at-libcurl/1.0"
 
