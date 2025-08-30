@@ -292,6 +292,32 @@ static uint8_t at_bnsd_space_query(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+static uint8_t at_bnsd_format_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    snprintf((char *)buffer, 128, 
+        "AT+BNSD_FORMAT\r\n"
+        "Format SD card with FAT32 filesystem\r\n"
+        "WARNING: This will erase all data on the SD card!\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_format_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    snprintf((char *)buffer, 64, "+BNSD_FORMAT:%s\r\n", 
+             at_sd_is_mounted() ? "READY" : "NO_CARD");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnsd_format_exe(uint8_t *cmd_name)
+{
+    bool success = at_sd_format();
+    return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
@@ -300,6 +326,7 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNSD_MOUNT", at_bnsd_mount_test, at_bnsd_mount_query, at_bnsd_mount_setup, at_bnsd_mount_exe},
     {"+BNSD_UNMOUNT", at_bnsd_unmount_test, at_bnsd_unmount_query, NULL, at_bnsd_unmount_exe},
     {"+BNSD_SPACE", at_bnsd_space_test, at_bnsd_space_query, NULL, NULL},
+    {"+BNSD_FORMAT", at_bnsd_format_test, at_bnsd_format_query, NULL, at_bnsd_format_exe},
 };
 
 bool esp_at_custom_cmd_register(void)

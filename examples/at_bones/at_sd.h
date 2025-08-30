@@ -96,4 +96,11 @@ bool at_sd_mkdir_recursive(const char *path);
  */
 const char *at_sd_get_mount_point(void);
 
+/**
+ * @brief Format SD card with FAT32 filesystem
+ * 
+ * @return true on success, false on failure
+ */
+bool at_sd_format(void);
+
 #endif /* AT_SD_H */

@@ -347,3 +347,43 @@ const char *at_sd_get_mount_point(void)
     }
     return NULL;
 }
+
+bool at_sd_format(void)
+{
+    if (!g_sd_ctx.initialized) {
+        ESP_LOGE(TAG, "SD card module not initialized");
+        return false;
+    }
+    
+    // Card must be mounted before formatting
+    bool was_mounted = g_sd_ctx.mounted;
+    if (!was_mounted) {
+        ESP_LOGI(TAG, "Mounting SD card before formatting");
+        if (!at_sd_mount(NULL)) {
+            ESP_LOGE(TAG, "Failed to mount SD card before formatting");
+            return false;
+        }
+    }
+    
+    ESP_LOGI(TAG, "Starting SD card format operation");
+    
+    // Use the existing mounted card and mount point
+    esp_err_t ret = esp_vfs_fat_sdcard_format(g_sd_ctx.mount_point, g_sd_ctx.card);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to format SD card: %s", esp_err_to_name(ret));
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "SD card formatted successfully");
+    
+    // If the card wasn't originally mounted, unmount it after formatting
+    if (!was_mounted) {
+        ESP_LOGI(TAG, "Unmounting SD card after format (was not originally mounted)");
+        if (!at_sd_unmount()) {
+            ESP_LOGW(TAG, "Warning: Failed to unmount SD card after format");
+        }
+    }
+    
+    ESP_LOGI(TAG, "SD card format operation completed successfully");
+    return true;
+}
