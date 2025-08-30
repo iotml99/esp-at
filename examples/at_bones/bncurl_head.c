@@ -32,14 +32,8 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx)
     // Use common functionality for HEAD request
     bool success = bncurl_common_execute_request(ctx, &stream, "HEAD");
     
-    // For HEAD requests, we typically only want headers, no body data
-    // The common function handles this by not setting write callbacks for HEAD
-    
-    if (success) {
-        // Send a simple success message for HEAD requests
-        const char *head_ok = "HEAD request completed successfully\r\n";
-        esp_at_port_write_data((uint8_t *)head_ok, strlen(head_ok));
-    }
+    // For HEAD requests, headers are streamed using +POST: markers via the streaming system
+    // This provides consistent UART output format with GET/POST requests
     
     // Finalize streaming (will send SEND OK/ERROR)
     bncurl_stream_finalize(&stream, success);

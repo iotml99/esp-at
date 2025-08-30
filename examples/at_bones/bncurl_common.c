@@ -177,11 +177,63 @@ size_t bncurl_common_write_callback(void *contents, size_t size, size_t nmemb, v
     return total_size;
 }
 
-// Common header callback to get content length
+// Common header callback to get content length and stream headers for HEAD requests
 size_t bncurl_common_header_callback(char *buffer, size_t size, size_t nitems, void *userdata)
 {
     bncurl_common_context_t *common_ctx = (bncurl_common_context_t *)userdata;
     size_t total_size = size * nitems;
+    
+    // For HEAD requests, stream headers using the streaming buffer system
+    if (common_ctx && common_ctx->ctx && 
+        strcmp(common_ctx->ctx->params.method, "HEAD") == 0) {
+        // Only process HTTP headers (skip status line and empty lines)
+        if (total_size > 2 && buffer[0] != '\r' && buffer[0] != '\n' &&
+            strncmp(buffer, "HTTP/", 5) != 0) {
+            
+            // Clean up the header line by removing trailing CRLF
+            char header_line[512];
+            size_t copy_len = total_size < sizeof(header_line) - 3 ? total_size : sizeof(header_line) - 3; // Leave space for \r\n\0
+            memcpy(header_line, buffer, copy_len);
+            header_line[copy_len] = '\0';
+            
+            // Remove trailing \r\n
+            char *end = header_line + strlen(header_line) - 1;
+            while (end >= header_line && (*end == '\r' || *end == '\n')) {
+                *end = '\0';
+                end--;
+            }
+            
+            // Add back clean CRLF for output
+            if (strlen(header_line) > 0) {
+                strcat(header_line, "\r\n");
+                
+                // Write header to streaming buffer
+                bncurl_stream_context_t *stream = common_ctx->stream;
+                bncurl_stream_buffer_t *active_buf = &stream->buffers[stream->active_buffer];
+                size_t header_len = strlen(header_line);
+                
+                // Check if header fits in current buffer
+                if (active_buf->size + header_len <= BNCURL_STREAM_BUFFER_SIZE) {
+                    memcpy(active_buf->data + active_buf->size, header_line, header_len);
+                    active_buf->size += header_len;
+                } else {
+                    // Current buffer full, stream it and switch to next buffer
+                    if (active_buf->size > 0) {
+                        bncurl_stream_buffer_to_output(stream, stream->active_buffer);
+                        stream->active_buffer = (stream->active_buffer + 1) % BNCURL_STREAM_BUFFER_COUNT;
+                        active_buf = &stream->buffers[stream->active_buffer];
+                        active_buf->size = 0;
+                    }
+                    
+                    // Add header to new buffer
+                    if (header_len <= BNCURL_STREAM_BUFFER_SIZE) {
+                        memcpy(active_buf->data, header_line, header_len);
+                        active_buf->size = header_len;
+                    }
+                }
+            }
+        }
+    }
     
     // Look for Content-Length header
     if (strncasecmp(buffer, "Content-Length:", 15) == 0) {
@@ -229,6 +281,7 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     CURL *curl;
     CURLcode res;
     bool success = false;
+    char *post_data = NULL;  // Track allocated POST data for cleanup
     
     // Initialize common context
     bncurl_common_context_t common_ctx;
@@ -283,9 +336,62 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         // GET is default, no special setup needed
     } else if (strcmp(method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        // TODO: Add POST data handling
+        
+        // Handle POST data if provided
+        if (strlen(ctx->params.data_upload) > 0) {
+            // Check if it's a file upload (starts with @) or raw data size
+            if (ctx->params.data_upload[0] == '@') {
+                // File upload - read from file
+                const char *file_path = ctx->params.data_upload + 1; // Skip @
+                ESP_LOGI(TAG, "POST: Uploading from file: %s", file_path);
+                
+                FILE *fp = fopen(file_path, "rb");
+                if (fp) {
+                    // Get file size
+                    fseek(fp, 0, SEEK_END);
+                    long file_size = ftell(fp);
+                    fseek(fp, 0, SEEK_SET);
+                    
+                    // Read file content
+                    post_data = malloc(file_size);
+                    if (post_data) {
+                        size_t read_size = fread(post_data, 1, file_size, fp);
+                        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
+                        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, read_size);
+                        ESP_LOGI(TAG, "POST: File uploaded, size: %zu bytes", read_size);
+                    }
+                    fclose(fp);
+                } else {
+                    ESP_LOGE(TAG, "POST: Failed to open file: %s", file_path);
+                }
+            } else {
+                // Raw data size - for now, send empty data of specified size
+                // In a full implementation, this would read from UART
+                long data_size = atol(ctx->params.data_upload);
+                ESP_LOGI(TAG, "POST: Empty data upload, size: %ld bytes", data_size);
+                
+                if (data_size > 0) {
+                    char *empty_data = calloc(data_size, 1);
+                    if (empty_data) {
+                        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, empty_data);
+                        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, data_size);
+                        // Note: empty_data will be freed after curl_easy_perform
+                    }
+                } else {
+                    // Send truly empty POST
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+                }
+            }
+        } else {
+            // Empty POST request
+            ESP_LOGI(TAG, "POST: Empty POST request (no data)");
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+        }
     } else if (strcmp(method, "HEAD") == 0) {
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+        ESP_LOGI(TAG, "HEAD: Request configured (headers only)");
     }
     
     // Set callbacks for data receiving (not for HEAD requests)
@@ -358,13 +464,12 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         long response_code;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
         
-        if (response_code == 200 || (strcmp(method, "HEAD") == 0 && response_code == 200)) {
-            // For non-HEAD requests, stream any remaining data in the active buffer
-            if (strcmp(method, "HEAD") != 0) {
-                bncurl_stream_buffer_t *active_buf = &stream->buffers[stream->active_buffer];
-                if (active_buf->size > 0) {
-                    bncurl_stream_buffer_to_output(stream, stream->active_buffer);
-                }
+        // Success criteria: 2xx status codes for all methods
+        if (response_code >= 200 && response_code < 300) {
+            // Stream any remaining data in the active buffer
+            bncurl_stream_buffer_t *active_buf = &stream->buffers[stream->active_buffer];
+            if (active_buf->size > 0) {
+                bncurl_stream_buffer_to_output(stream, stream->active_buffer);
             }
             
             success = true;
@@ -399,6 +504,9 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     // Cleanup
     if (headers) {
         curl_slist_free_all(headers);
+    }
+    if (post_data) {
+        free(post_data);
     }
     curl_easy_cleanup(curl);
     

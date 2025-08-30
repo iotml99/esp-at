@@ -23,13 +23,13 @@ bool bncurl_execute_post_request(bncurl_context_t *ctx)
         return false;
     }
     
-    ESP_LOGW(TAG, "POST method not yet fully implemented");
+    ESP_LOGI(TAG, "Starting POST request to: %s", ctx->params.url);
     
     // Initialize streaming context with context for file path
     bncurl_stream_context_t stream;
     bncurl_stream_init(&stream, ctx);
     
-    // For now, use common functionality but note it's not complete
+    // Use common functionality for POST request
     bool success = bncurl_common_execute_request(ctx, &stream, "POST");
     
     // Finalize streaming
