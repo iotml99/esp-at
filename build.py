@@ -186,7 +186,7 @@ def build_project(platform_name, module_name, silence, build_args):
     exp_macro_cmd += '{} SILENCE={} &&'.format(sys_cmd, silence)
     
     # Add at_custom_cmd component automatically if it exists
-    at_custom_cmd_path = os.path.join(os.getcwd(), 'examples', 'at_custom_cmd')
+    at_custom_cmd_path = os.path.join(os.getcwd(), 'examples', 'at_bones')
     if os.path.exists(at_custom_cmd_path):
         existing_custom_components = os.environ.get('AT_CUSTOM_COMPONENTS', '')
         if existing_custom_components:
