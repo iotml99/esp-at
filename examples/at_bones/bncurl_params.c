@@ -9,26 +9,14 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include "esp_at.h"
-
-typedef struct {
-    char *method;
-    char *url;
-    char **headers;
-    int header_count;
-    char *data_upload;      // "-du" parameter (number or @file)
-    char *data_download;    // "-dd" parameter (file path)
-    char *cookie_save;      // "-c" parameter (cookie file to save)
-    char *cookie_send;      // "-b" parameter (cookie file to send)
-    char *range;            // "-r" parameter (range_start-range_end)
-    bool verbose;           // "-v" flag
-} bncurl_params_t;
+#include "bncurl_params.h"
 
 // Function to print parsed parameters
 static void print_bncurl_params(const bncurl_params_t *params)
 {
     printf("=== BNCURL Parameters ===\n");
-    printf("Method: %s\n", params->method ? params->method : "NULL");
-    printf("URL: %s\n", params->url ? params->url : "NULL");
+    printf("Method: %s\n", strlen(params->method) > 0 ? params->method : "NULL");
+    printf("URL: %s\n", strlen(params->url) > 0 ? params->url : "NULL");
     
     if (params->header_count > 0) {
         printf("Headers (%d):\n", params->header_count);
@@ -39,47 +27,18 @@ static void print_bncurl_params(const bncurl_params_t *params)
         printf("Headers: None\n");
     }
     
-    printf("Data Upload (-du): %s\n", params->data_upload ? params->data_upload : "None");
-    printf("Data Download (-dd): %s\n", params->data_download ? params->data_download : "None");
-    printf("Cookie Save (-c): %s\n", params->cookie_save ? params->cookie_save : "None");
-    printf("Cookie Send (-b): %s\n", params->cookie_send ? params->cookie_send : "None");
-    printf("Range (-r): %s\n", params->range ? params->range : "None");
+    printf("Data Upload (-du): %s\n", strlen(params->data_upload) > 0 ? params->data_upload : "None");
+    printf("Data Download (-dd): %s\n", strlen(params->data_download) > 0 ? params->data_download : "None");
+    printf("Cookie Save (-c): %s\n", strlen(params->cookie_save) > 0 ? params->cookie_save : "None");
+    printf("Cookie Send (-b): %s\n", strlen(params->cookie_send) > 0 ? params->cookie_send : "None");
+    printf("Range (-r): %s\n", strlen(params->range) > 0 ? params->range : "None");
     printf("Verbose (-v): %s\n", params->verbose ? "Yes" : "No");
     printf("========================\n");
 }
 
-// Function to free allocated memory
-static void free_bncurl_params(bncurl_params_t *params)
+// Function to initialize parameters structure
+static void init_bncurl_params(bncurl_params_t *params)
 {
-    if (params->method) {
-        free(params->method);
-    }
-    if (params->url) {
-        free(params->url);
-    }
-    if (params->headers) {
-        for (int i = 0; i < params->header_count; i++) {
-            if (params->headers[i]) {
-                free(params->headers[i]);
-            }
-        }
-        free(params->headers);
-    }
-    if (params->data_upload) {
-        free(params->data_upload);
-    }
-    if (params->data_download) {
-        free(params->data_download);
-    }
-    if (params->cookie_save) {
-        free(params->cookie_save);
-    }
-    if (params->cookie_send) {
-        free(params->cookie_send);
-    }
-    if (params->range) {
-        free(params->range);
-    }
     memset(params, 0, sizeof(bncurl_params_t));
 }
 
@@ -109,26 +68,26 @@ static bool validate_param_combinations(const bncurl_params_t *params)
 {
     // GET/HEAD cannot have data upload
     if ((strcmp(params->method, "GET") == 0 || strcmp(params->method, "HEAD") == 0) && 
-        params->data_upload) {
+        strlen(params->data_upload) > 0) {
         printf("ERROR: GET/HEAD methods cannot have data upload (-du)\n");
         return false;
     }
     
     // POST/HEAD cannot have range
     if ((strcmp(params->method, "POST") == 0 || strcmp(params->method, "HEAD") == 0) && 
-        params->range) {
+        strlen(params->range) > 0) {
         printf("ERROR: POST/HEAD methods cannot have range (-r)\n");
         return false;
     }
     
     // Range requires data download
-    if (params->range && !params->data_download) {
+    if (strlen(params->range) > 0 && strlen(params->data_download) == 0) {
         printf("ERROR: Range (-r) requires data download (-dd)\n");
         return false;
     }
     
     // POST requires data upload
-    if (strcmp(params->method, "POST") == 0 && !params->data_upload) {
+    if (strcmp(params->method, "POST") == 0 && strlen(params->data_upload) == 0) {
         printf("ERROR: POST method requires data upload (-du)\n");
         return false;
     }
@@ -139,9 +98,12 @@ static bool validate_param_combinations(const bncurl_params_t *params)
 // Main parsing function
 static uint8_t parse_bncurl_params(uint8_t para_num)
 {
-    bncurl_params_t params = {0};
+    bncurl_params_t params;
     uint8_t index = 0;
     uint8_t *param_str = NULL;
+    
+    // Initialize parameters structure
+    init_bncurl_params(&params);
     
     printf("Parsing BNCURL command with %d parameters\n", para_num);
     
@@ -156,25 +118,36 @@ static uint8_t parse_bncurl_params(uint8_t para_num)
         printf("ERROR: Failed to parse method parameter\n");
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    params.method = strdup((char *)param_str);
+    
+    // Copy method with length validation
+    if (strlen((char *)param_str) > BNCURL_MAX_METHOD_LENGTH) {
+        printf("ERROR: Method too long. Max length: %d\n", BNCURL_MAX_METHOD_LENGTH);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    strncpy(params.method, (char *)param_str, BNCURL_MAX_METHOD_LENGTH);
+    params.method[BNCURL_MAX_METHOD_LENGTH] = '\0';
     
     if (!is_valid_method(params.method)) {
         printf("ERROR: Invalid method '%s'. Valid methods: GET, POST, HEAD\n", params.method);
-        free_bncurl_params(&params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // Parse URL (second parameter)
     if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
         printf("ERROR: Failed to parse URL parameter\n");
-        free_bncurl_params(&params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    params.url = strdup((char *)param_str);
+    
+    // Copy URL with length validation
+    if (strlen((char *)param_str) > BNCURL_MAX_URL_LENGTH) {
+        printf("ERROR: URL too long. Max length: %d\n", BNCURL_MAX_URL_LENGTH);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    strncpy(params.url, (char *)param_str, BNCURL_MAX_URL_LENGTH);
+    params.url[BNCURL_MAX_URL_LENGTH] = '\0';
     
     if (!is_valid_url(params.url)) {
         printf("ERROR: Invalid URL '%s'. Must start with http:// or https://\n", params.url);
-        free_bncurl_params(&params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
@@ -182,7 +155,6 @@ static uint8_t parse_bncurl_params(uint8_t para_num)
     while (index < para_num) {
         if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
             printf("ERROR: Failed to parse parameter at index %d\n", index - 1);
-            free_bncurl_params(&params);
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
@@ -192,144 +164,161 @@ static uint8_t parse_bncurl_params(uint8_t para_num)
             // Header option - next parameter is the header value
             if (index >= para_num) {
                 printf("ERROR: -H option requires a header value\n");
-                free_bncurl_params(&params);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            if (params.header_count >= BNCURL_MAX_HEADERS_COUNT) {
+                printf("ERROR: Too many headers. Max allowed: %d\n", BNCURL_MAX_HEADERS_COUNT);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
                 printf("ERROR: Failed to parse header value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            // Allocate or reallocate headers array
-            params.headers = realloc(params.headers, (params.header_count + 1) * sizeof(char*));
-            if (!params.headers) {
-                printf("ERROR: Memory allocation failed for headers\n");
-                free_bncurl_params(&params);
+            // Copy header with length validation
+            if (strlen((char *)param_str) > BNCURL_MAX_HEADER_LENGTH) {
+                printf("ERROR: Header too long. Max length: %d\n", BNCURL_MAX_HEADER_LENGTH);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            params.headers[params.header_count] = strdup((char *)param_str);
+            strncpy(params.headers[params.header_count], (char *)param_str, BNCURL_MAX_HEADER_LENGTH);
+            params.headers[params.header_count][BNCURL_MAX_HEADER_LENGTH] = '\0';
             params.header_count++;
             
         } else if (strcmp(option, "-du") == 0) {
             // Data upload option
-            if (params.data_upload) {
+            if (strlen(params.data_upload) > 0) {
                 printf("ERROR: Duplicate -du option\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (index >= para_num) {
                 printf("ERROR: -du option requires a value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
                 printf("ERROR: Failed to parse -du value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            params.data_upload = strdup((char *)param_str);
+            // Copy data upload parameter with length validation
+            if (strlen((char *)param_str) > BNCURL_MAX_PARAMETER_LENGTH) {
+                printf("ERROR: Data upload parameter too long. Max length: %d\n", BNCURL_MAX_PARAMETER_LENGTH);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strncpy(params.data_upload, (char *)param_str, BNCURL_MAX_PARAMETER_LENGTH);
+            params.data_upload[BNCURL_MAX_PARAMETER_LENGTH] = '\0';
             
         } else if (strcmp(option, "-dd") == 0) {
             // Data download option
-            if (params.data_download) {
+            if (strlen(params.data_download) > 0) {
                 printf("ERROR: Duplicate -dd option\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (index >= para_num) {
                 printf("ERROR: -dd option requires a file path\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
                 printf("ERROR: Failed to parse -dd value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            params.data_download = strdup((char *)param_str);
+            char *path_str = (char *)param_str;
             
             // Handle @ prefix normalization
-            if (params.data_download[0] == '@') {
-                char *normalized = strdup(params.data_download + 1);
-                free(params.data_download);
-                params.data_download = normalized;
+            if (path_str[0] == '@') {
+                path_str++; // Skip the @ character
                 printf("INFO: Normalized -dd path (removed @ prefix)\n");
             }
             
+            // Copy data download path with length validation
+            if (strlen(path_str) > BNCURL_MAX_FILE_PATH_LENGTH) {
+                printf("ERROR: File path too long. Max length: %d\n", BNCURL_MAX_FILE_PATH_LENGTH);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strncpy(params.data_download, path_str, BNCURL_MAX_FILE_PATH_LENGTH);
+            params.data_download[BNCURL_MAX_FILE_PATH_LENGTH] = '\0';
+            
         } else if (strcmp(option, "-c") == 0) {
             // Cookie save option
-            if (params.cookie_save) {
+            if (strlen(params.cookie_save) > 0) {
                 printf("ERROR: Duplicate -c option\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (index >= para_num) {
                 printf("ERROR: -c option requires a cookie file path\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
                 printf("ERROR: Failed to parse -c value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            params.cookie_save = strdup((char *)param_str);
+            // Copy cookie save path with length validation
+            if (strlen((char *)param_str) > BNCURL_MAX_COOKIE_FILE_PATH) {
+                printf("ERROR: Cookie file path too long. Max length: %d\n", BNCURL_MAX_COOKIE_FILE_PATH);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strncpy(params.cookie_save, (char *)param_str, BNCURL_MAX_COOKIE_FILE_PATH);
+            params.cookie_save[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
         } else if (strcmp(option, "-b") == 0) {
             // Cookie send option
-            if (params.cookie_send) {
+            if (strlen(params.cookie_send) > 0) {
                 printf("ERROR: Duplicate -b option\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (index >= para_num) {
                 printf("ERROR: -b option requires a cookie file path\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
                 printf("ERROR: Failed to parse -b value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            params.cookie_send = strdup((char *)param_str);
+            // Copy cookie send path with length validation
+            if (strlen((char *)param_str) > BNCURL_MAX_COOKIE_FILE_PATH) {
+                printf("ERROR: Cookie file path too long. Max length: %d\n", BNCURL_MAX_COOKIE_FILE_PATH);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strncpy(params.cookie_send, (char *)param_str, BNCURL_MAX_COOKIE_FILE_PATH);
+            params.cookie_send[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
         } else if (strcmp(option, "-r") == 0) {
             // Range option
-            if (params.range) {
+            if (strlen(params.range) > 0) {
                 printf("ERROR: Duplicate -r option\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (index >= para_num) {
                 printf("ERROR: -r option requires a range value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
             if (esp_at_get_para_as_str(index++, &param_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
                 printf("ERROR: Failed to parse -r value\n");
-                free_bncurl_params(&params);
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
-            params.range = strdup((char *)param_str);
+            // Copy range parameter with length validation
+            if (strlen((char *)param_str) > BNCURL_MAX_RANGE_STRING_LENGTH) {
+                printf("ERROR: Range parameter too long. Max length: %d\n", BNCURL_MAX_RANGE_STRING_LENGTH);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strncpy(params.range, (char *)param_str, BNCURL_MAX_RANGE_STRING_LENGTH);
+            params.range[BNCURL_MAX_RANGE_STRING_LENGTH] = '\0';
             
         } else if (strcmp(option, "-v") == 0) {
             // Verbose option (no additional parameter)
@@ -337,22 +326,17 @@ static uint8_t parse_bncurl_params(uint8_t para_num)
             
         } else {
             printf("ERROR: Unknown option '%s'\n", option);
-            free_bncurl_params(&params);
             return ESP_AT_RESULT_CODE_ERROR;
         }
     }
     
     // Validate parameter combinations
     if (!validate_param_combinations(&params)) {
-        free_bncurl_params(&params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // Print the parsed parameters
     print_bncurl_params(&params);
-    
-    // Free allocated memory
-    free_bncurl_params(&params);
     
     return ESP_AT_RESULT_CODE_OK;
 }
