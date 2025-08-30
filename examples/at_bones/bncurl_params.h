@@ -51,6 +51,6 @@ typedef struct {
  * @param para_num Number of parameters in the AT command
  * @return ESP_AT_RESULT_CODE_OK on success, ESP_AT_RESULT_CODE_ERROR on failure
  */
-uint8_t bncurl_parse_and_print_params(uint8_t para_num);
+uint8_t bncurl_parse_and_print_params(uint8_t para_num, bncurl_params_t *params);
 
 #endif // BNCURL_PARAMS_H
