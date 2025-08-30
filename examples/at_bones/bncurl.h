@@ -5,6 +5,8 @@
 #include <string.h>
 #include "bncurl_params.h"
 
+// Forward declarations
+typedef struct bncurl_response bncurl_response_t;
 
 typedef struct 
 {
@@ -16,6 +18,14 @@ typedef struct
     /* data */
 }bncurl_context_t;
 
+// Response structure for HTTP requests
+typedef struct bncurl_response {
+    char *data;
+    size_t size;
+    size_t capacity;
+    long response_code;
+    char *content_type;
+} bncurl_response_t;
 
 bool bncurl_init(bncurl_context_t *ctx);
 
@@ -26,5 +36,15 @@ bool bncurl_stop(bncurl_context_t *ctx);
 bool bncurl_is_running(bncurl_context_t *ctx);
 
 void bncurl_get_progress(bncurl_context_t *ctx, uint64_t *bytes_transferred, uint64_t *bytes_total);
+
+// Forward declarations for method-specific executors
+// These are implemented in separate files: bncurl_get.c, bncurl_post.c, bncurl_head.c
+bool bncurl_execute_get_request(bncurl_context_t *ctx);
+bool bncurl_execute_post_request(bncurl_context_t *ctx);
+bool bncurl_execute_head_request(bncurl_context_t *ctx);
+
+// Helper functions for response management (deprecated - use streaming approach)
+bool bncurl_response_init(bncurl_response_t *response);
+void bncurl_response_cleanup(bncurl_response_t *response);
 
 #endif /* BNCURL_H */

@@ -12,6 +12,7 @@
 #include "bncurl_params.h"
 #include "bncurl.h"
 #include "bncurl_config.h"
+#include "bncurl_executor.h"
 
 
 static bncurl_context_t *bncurl_ctx = NULL;
@@ -28,8 +29,28 @@ static uint8_t at_test_cmd_test(uint8_t *cmd_name)
 
 static uint8_t at_query_cmd_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "query command: <AT%s?> is executed\r\n", cmd_name);
+    uint8_t buffer[128] = {0};
+    
+    // Get executor status
+    bncurl_executor_status_t status = bncurl_executor_get_status();
+    const char *status_str;
+    
+    switch (status) {
+        case BNCURL_EXECUTOR_IDLE:
+            status_str = "IDLE";
+            break;
+        case BNCURL_EXECUTOR_QUEUED:
+            status_str = "QUEUED";
+            break;
+        case BNCURL_EXECUTOR_EXECUTING:
+            status_str = "EXECUTING";
+            break;
+        default:
+            status_str = "UNKNOWN";
+            break;
+    }
+    
+    snprintf((char *)buffer, 128, "+BNCURL:%s\r\n", status_str);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
 
     return ESP_AT_RESULT_CODE_OK;
@@ -37,8 +58,34 @@ static uint8_t at_query_cmd_test(uint8_t *cmd_name)
 
 static uint8_t at_setup_cmd_test(uint8_t para_num)
 {
-    // Use the BNCURL parameter parser to parse and print parameters
-    return bncurl_parse_and_print_params(para_num, &bncurl_ctx->params);
+    // Parse parameters first
+    uint8_t parse_result = bncurl_parse_and_print_params(para_num, &bncurl_ctx->params);
+    if (parse_result != ESP_AT_RESULT_CODE_OK) {
+        return parse_result;
+    }
+    
+    // Check if this is a supported method (GET, POST, HEAD)
+    if (strcmp(bncurl_ctx->params.method, "GET") == 0 || 
+        strcmp(bncurl_ctx->params.method, "POST") == 0 || 
+        strcmp(bncurl_ctx->params.method, "HEAD") == 0) {
+        
+        // Try to submit the request to the executor
+        if (bncurl_executor_submit_request(bncurl_ctx)) {
+            // Request queued successfully - return OK
+            // The actual execution happens asynchronously
+            // Completion will be indicated by SEND OK/SEND ERROR messages
+            return ESP_AT_RESULT_CODE_OK;
+        } else {
+            // Executor is busy - return ERROR
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+    } else {
+        // Unsupported method
+        uint8_t buffer[64] = {0};
+        snprintf((char *)buffer, 64, "ERROR: Method %s not supported\r\n", bncurl_ctx->params.method);
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
 }
 
 static uint8_t at_exe_cmd_test(uint8_t *cmd_name)
@@ -106,12 +153,17 @@ static uint8_t at_bncurl_stop_query(uint8_t *cmd_name)
     }
 
     uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "+BNCURL_STOP:\r\n");
-    esp_at_port_write_data(buffer, strlen((char *)buffer));
-
-    if (!bncurl_stop(bncurl_ctx)) {
-        return ESP_AT_RESULT_CODE_ERROR;
+    
+    // Try to stop current executor operation
+    bool stopped = bncurl_executor_stop_current();
+    
+    if (stopped) {
+        snprintf((char *)buffer, 64, "+BNCURL_STOP:1\r\n");
+    } else {
+        snprintf((char *)buffer, 64, "+BNCURL_STOP:0\r\n");
     }
+    
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
    
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -145,11 +197,20 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
 
 bool esp_at_custom_cmd_register(void)
 {
+    // Initialize the executor first
+    if (!bncurl_executor_init()) {
+        return false;
+    }
+    
     bncurl_ctx = calloc(1, sizeof(bncurl_context_t));
     if(!bncurl_ctx) {
+        bncurl_executor_deinit();
         return false;
     }
     if(!bncurl_init(bncurl_ctx)) {
+        free(bncurl_ctx);
+        bncurl_ctx = NULL;
+        bncurl_executor_deinit();
         return false;
     }
     return esp_at_custom_cmd_array_regist(at_custom_cmd, sizeof(at_custom_cmd) / sizeof(esp_at_cmd_struct));

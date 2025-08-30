@@ -1,5 +1,45 @@
 #include "bncurl.h"
 #include "bncurl_config.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+bool bncurl_response_init(bncurl_response_t *response)
+{
+    if (!response) {
+        return false;
+    }
+    
+    response->data = malloc(BNCURL_HTTP_RESPONSE_BUFFER);
+    if (!response->data) {
+        return false;
+    }
+    
+    response->size = 0;
+    response->capacity = BNCURL_HTTP_RESPONSE_BUFFER;
+    response->response_code = 0;
+    response->content_type = NULL;
+    response->data[0] = '\0';
+    
+    return true;
+}
+
+void bncurl_response_cleanup(bncurl_response_t *response)
+{
+    if (response) {
+        if (response->data) {
+            free(response->data);
+            response->data = NULL;
+        }
+        if (response->content_type) {
+            free(response->content_type);
+            response->content_type = NULL;
+        }
+        response->size = 0;
+        response->capacity = 0;
+        response->response_code = 0;
+    }
+}
 
 bool bncurl_init(bncurl_context_t *ctx)
 {
