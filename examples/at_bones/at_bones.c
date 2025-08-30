@@ -10,6 +10,7 @@
 #include "esp_at.h"
 #include "bncurl_params.h"
 #include "bncurl.h"
+#include "bncurl_config.h"
 
 
 static bncurl_context_t *bncurl_ctx = NULL;
@@ -48,11 +49,58 @@ static uint8_t at_exe_cmd_test(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+static uint8_t at_bncurl_timeout_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[128] = {0};
+    snprintf((char *)buffer, 128, 
+        "AT+BNCURL_TIMEOUT=<timeout>\r\n"
+        "Set timeout for server reaction in seconds.\r\n"
+        "Range: %d-%d seconds\r\n", 
+        BNCURL_MIN_TIMEOUT, BNCURL_MAX_TIMEOUT);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_timeout_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    uint32_t timeout = bncurl_get_timeout(bncurl_ctx);
+    if (timeout == 0) {
+        timeout = BNCURL_DEFAULT_TIMEOUT;  // Return default if not set
+    }
+    snprintf((char *)buffer, 64, "+BNCURL_TIMEOUT:%u\r\n", timeout);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_timeout_setup(uint8_t para_num)
+{
+    if (para_num != 1) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    int32_t timeout = 0;
+    if (esp_at_get_para_as_digit(0, &timeout) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    if (timeout < 0) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    if (timeout < BNCURL_MIN_TIMEOUT || timeout > BNCURL_MAX_TIMEOUT) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    if (!bncurl_set_timeout(bncurl_ctx, (uint32_t)timeout)) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
-    /**
-     * @brief You can define your own AT commands here.
-     */
+    {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL}
 };
 
 bool esp_at_custom_cmd_register(void)
