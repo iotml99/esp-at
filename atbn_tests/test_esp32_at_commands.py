@@ -553,6 +553,298 @@ class TestAdvancedFeatures:
 
 
 # =============================================================================
+# BNCURL TIMEOUT COMMAND TESTS
+# =============================================================================
+
+@pytest.mark.bncurl_timeout
+class TestBNCURLTimeoutCommands:
+    """Comprehensive BNCURL timeout command testing."""
+    
+    def test_bncurl_timeout_help(self, tester):
+        """Test BNCURL timeout help command."""
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT=?")
+        assert success, f"BNCURL timeout help command failed: {response}"
+        
+        # Check for help information
+        response_text = " ".join(response).lower()
+        assert "timeout" in response_text, f"No timeout help information found: {response}"
+        assert "seconds" in response_text, f"No seconds information found: {response}"
+    
+    def test_bncurl_timeout_query_default(self, tester):
+        """Test BNCURL timeout query returns default value."""
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+        assert success, f"BNCURL timeout query failed: {response}"
+        
+        # Check response format
+        timeout_response = None
+        for line in response:
+            if "+BNCURL_TIMEOUT:" in line:
+                timeout_response = line
+                break
+        
+        assert timeout_response is not None, f"No timeout response found: {response}"
+        
+        # Extract timeout value
+        import re
+        match = re.search(r'\+BNCURL_TIMEOUT:(\d+)', timeout_response)
+        assert match, f"Invalid timeout response format: {timeout_response}"
+        
+        timeout_value = int(match.group(1))
+        assert 1 <= timeout_value <= 120, f"Timeout value {timeout_value} out of valid range (1-120)"
+    
+    @pytest.mark.parametrize("timeout_value", [1, 30, 60, 120])
+    def test_bncurl_timeout_set_valid_values(self, tester, timeout_value):
+        """Test setting valid timeout values."""
+        # Set timeout
+        success, response = tester.send_command(f"AT+BNCURL_TIMEOUT={timeout_value}")
+        assert success, f"Failed to set timeout to {timeout_value}: {response}"
+        
+        # Verify by querying
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+        assert success, f"Failed to query timeout after setting to {timeout_value}: {response}"
+        
+        # Check that the value was set correctly
+        response_text = " ".join(response)
+        assert f"+BNCURL_TIMEOUT:{timeout_value}" in response_text, \
+            f"Timeout not set correctly. Expected {timeout_value}, got: {response}"
+    
+    @pytest.mark.parametrize("invalid_value", [0, -1, 121, 999, -10])
+    def test_bncurl_timeout_set_invalid_values(self, tester, invalid_value):
+        """Test setting invalid timeout values returns ERROR."""
+        success, response = tester.send_command(f"AT+BNCURL_TIMEOUT={invalid_value}")
+        assert not success, f"Setting invalid timeout {invalid_value} should fail but succeeded: {response}"
+        
+        # Verify ERROR is in response
+        response_text = " ".join(response).upper()
+        assert "ERROR" in response_text, f"Expected ERROR for invalid value {invalid_value}: {response}"
+    
+    @pytest.mark.parametrize("invalid_param", ["abc", "12.5", "", "30,40", "30 40"])
+    def test_bncurl_timeout_set_invalid_format(self, tester, invalid_param):
+        """Test setting timeout with invalid parameter format."""
+        success, response = tester.send_command(f'AT+BNCURL_TIMEOUT={invalid_param}')
+        assert not success, f"Setting invalid timeout format '{invalid_param}' should fail: {response}"
+    
+    def test_bncurl_timeout_boundary_values(self, tester):
+        """Test timeout boundary values (1 and 120 seconds)."""
+        # Test minimum value
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT=1")
+        assert success, f"Failed to set minimum timeout (1): {response}"
+        
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+        assert success and "+BNCURL_TIMEOUT:1" in " ".join(response), \
+            f"Minimum timeout not set correctly: {response}"
+        
+        # Test maximum value
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT=120")
+        assert success, f"Failed to set maximum timeout (120): {response}"
+        
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+        assert success and "+BNCURL_TIMEOUT:120" in " ".join(response), \
+            f"Maximum timeout not set correctly: {response}"
+    
+    def test_bncurl_timeout_persistence(self, tester):
+        """Test that timeout value persists between commands."""
+        # Set a specific timeout
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT=45")
+        assert success, f"Failed to set timeout to 45: {response}"
+        
+        # Execute another command
+        success, response = tester.send_command("AT")
+        assert success, f"Basic AT command failed: {response}"
+        
+        # Verify timeout is still set
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+        assert success and "+BNCURL_TIMEOUT:45" in " ".join(response), \
+            f"Timeout value not persistent: {response}"
+
+
+# =============================================================================
+# BNCURL STOP COMMAND TESTS
+# =============================================================================
+
+@pytest.mark.bncurl_stop
+class TestBNCURLStopCommands:
+    """BNCURL stop command testing."""
+    
+    def test_bncurl_stop_query(self, tester):
+        """Test BNCURL stop query command."""
+        success, response = tester.send_command("AT+BNCURL_STOP?")
+        assert success, f"BNCURL stop query failed: {response}"
+        
+        # Check response format
+        response_text = " ".join(response)
+        assert "+BNCURL_STOP:" in response_text, f"No stop response found: {response}"
+    
+    def test_bncurl_stop_when_not_running(self, tester):
+        """Test BNCURL stop when no operation is running."""
+        success, response = tester.send_command("AT+BNCURL_STOP?")
+        assert success, f"BNCURL stop should succeed even when not running: {response}"
+    
+    @pytest.mark.requires_wifi
+    def test_bncurl_stop_during_operation(self, tester):
+        """Test BNCURL stop during an active operation."""
+        if not tester.wifi_connected:
+            pytest.skip("WiFi not connected")
+        
+        # Start a download operation (this might take time)
+        import threading
+        import time
+        
+        def start_download():
+            tester.send_command('AT+BNCURL=GET,"http://httpbin.org/delay/10"', timeout=2)
+        
+        # Start download in background
+        download_thread = threading.Thread(target=start_download)
+        download_thread.start()
+        
+        # Wait a bit for download to start
+        time.sleep(1)
+        
+        # Send stop command
+        success, response = tester.send_command("AT+BNCURL_STOP?")
+        assert success, f"BNCURL stop during operation failed: {response}"
+        
+        # Clean up
+        download_thread.join(timeout=5)
+
+
+# =============================================================================
+# BNCURL PROGRESS COMMAND TESTS
+# =============================================================================
+
+@pytest.mark.bncurl_progress
+class TestBNCURLProgressCommands:
+    """BNCURL progress command testing."""
+    
+    def test_bncurl_progress_query_format(self, tester):
+        """Test BNCURL progress query response format."""
+        success, response = tester.send_command("AT+BNCURL_PROG?")
+        assert success, f"BNCURL progress query failed: {response}"
+        
+        # Check response format
+        progress_response = None
+        for line in response:
+            if "+BNCURL_PROG:" in line:
+                progress_response = line
+                break
+        
+        assert progress_response is not None, f"No progress response found: {response}"
+        
+        # Check format: +BNCURL_PROG:transferred/total
+        import re
+        match = re.search(r'\+BNCURL_PROG:(\d+)/(\d+)', progress_response)
+        assert match, f"Invalid progress response format: {progress_response}"
+        
+        transferred = int(match.group(1))
+        total = int(match.group(2))
+        
+        # Both values should be non-negative
+        assert transferred >= 0, f"Transferred bytes should be non-negative: {transferred}"
+        assert total >= 0, f"Total bytes should be non-negative: {total}"
+        
+        # Transferred should not exceed total (unless total is 0)
+        if total > 0:
+            assert transferred <= total, f"Transferred ({transferred}) should not exceed total ({total})"
+    
+    def test_bncurl_progress_initial_state(self, tester):
+        """Test BNCURL progress when no operation is active."""
+        success, response = tester.send_command("AT+BNCURL_PROG?")
+        assert success, f"BNCURL progress query failed: {response}"
+        
+        # Should return 0/0 when no operation is active
+        response_text = " ".join(response)
+        assert "+BNCURL_PROG:0/0" in response_text, \
+            f"Expected 0/0 progress when no operation active: {response}"
+    
+    @pytest.mark.requires_wifi
+    def test_bncurl_progress_during_download(self, tester):
+        """Test BNCURL progress during a download operation."""
+        if not tester.wifi_connected:
+            pytest.skip("WiFi not connected")
+        
+        # This test is more complex and would require actual download simulation
+        # For now, we'll just test that the command works
+        success, response = tester.send_command("AT+BNCURL_PROG?")
+        assert success, f"BNCURL progress query failed during download test: {response}"
+    
+    def test_bncurl_progress_multiple_queries(self, tester):
+        """Test multiple consecutive progress queries."""
+        for i in range(3):
+            success, response = tester.send_command("AT+BNCURL_PROG?")
+            assert success, f"BNCURL progress query {i+1} failed: {response}"
+            
+            # Each query should return valid format
+            response_text = " ".join(response)
+            assert "+BNCURL_PROG:" in response_text, \
+                f"Progress query {i+1} missing progress response: {response}"
+
+
+# =============================================================================
+# INTEGRATED BNCURL COMMAND TESTS
+# =============================================================================
+
+@pytest.mark.bncurl_integration
+class TestBNCURLIntegration:
+    """Integration tests for all BNCURL commands."""
+    
+    def test_all_bncurl_commands_basic(self, tester):
+        """Test basic functionality of all BNCURL commands."""
+        commands = [
+            "AT+BNCURL_TIMEOUT?",
+            "AT+BNCURL_TIMEOUT=30", 
+            "AT+BNCURL_STOP?",
+            "AT+BNCURL_PROG?"
+        ]
+        
+        for cmd in commands:
+            success, response = tester.send_command(cmd)
+            assert success, f"Command {cmd} failed: {response}"
+    
+    def test_bncurl_command_sequence(self, tester):
+        """Test a sequence of BNCURL commands."""
+        # Set timeout
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT=60")
+        assert success, f"Set timeout failed: {response}"
+        
+        # Query timeout
+        success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+        assert success and "+BNCURL_TIMEOUT:60" in " ".join(response), \
+            f"Query timeout failed: {response}"
+        
+        # Check progress
+        success, response = tester.send_command("AT+BNCURL_PROG?")
+        assert success, f"Progress query failed: {response}"
+        
+        # Stop (should work even if nothing running)
+        success, response = tester.send_command("AT+BNCURL_STOP?")
+        assert success, f"Stop command failed: {response}"
+    
+    def test_bncurl_timeout_ranges_comprehensive(self, tester):
+        """Comprehensive test of timeout value ranges."""
+        # Test various valid values
+        valid_timeouts = [1, 5, 10, 15, 30, 45, 60, 90, 120]
+        
+        for timeout in valid_timeouts:
+            success, response = tester.send_command(f"AT+BNCURL_TIMEOUT={timeout}")
+            assert success, f"Failed to set valid timeout {timeout}: {response}"
+            
+            # Verify it was set
+            success, response = tester.send_command("AT+BNCURL_TIMEOUT?")
+            assert success and f"+BNCURL_TIMEOUT:{timeout}" in " ".join(response), \
+                f"Timeout {timeout} not set correctly: {response}"
+    
+    @pytest.mark.parametrize("cmd_variant", [
+        "AT+BNCURL_TIMEOUT=?",  # Test command
+        "AT+BNCURL_TIMEOUT?",   # Query command  
+        "AT+BNCURL_TIMEOUT=30", # Setup command
+    ])
+    def test_bncurl_timeout_command_variants(self, tester, cmd_variant):
+        """Test different BNCURL timeout command variants."""
+        success, response = tester.send_command(cmd_variant)
+        assert success, f"Command variant {cmd_variant} failed: {response}"
+
+
+# =============================================================================
 # PARAMETRIZED TESTS
 # =============================================================================
 

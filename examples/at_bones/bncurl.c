@@ -39,3 +39,36 @@ bool bncurl_set_timeout(bncurl_context_t *ctx, uint32_t timeout)
     ctx->timeout = timeout;
     return true;
 }
+
+
+bool bncurl_is_running(bncurl_context_t *ctx)
+{
+    if (!ctx)
+    {
+        return false;
+    }
+    return ctx->is_running;
+}
+
+bool bncurl_stop(bncurl_context_t *ctx)
+{
+    if (!ctx)
+    {
+        return false;
+    }
+    ctx->is_running = false;
+    return true ;
+}
+
+void bncurl_get_progress(bncurl_context_t *ctx, uint64_t *bytes_transferred, uint64_t *bytes_total)
+{
+    if (!ctx || !bytes_transferred || !bytes_total)
+    {
+        if (bytes_transferred) *bytes_transferred = 0;
+        if (bytes_total) *bytes_total = 0;
+        return;
+    }
+    
+    *bytes_transferred = ctx->bytes_transferred;
+    *bytes_total = ctx->bytes_total;
+}

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "esp_at.h"
 #include "bncurl_params.h"
 #include "bncurl.h"
@@ -98,9 +99,48 @@ static uint8_t at_bncurl_timeout_setup(uint8_t para_num)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+static uint8_t at_bncurl_stop_query(uint8_t *cmd_name)
+{
+    if (!bncurl_ctx) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    uint8_t buffer[64] = {0};
+    snprintf((char *)buffer, 64, "+BNCURL_STOP:\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+
+    if (!bncurl_stop(bncurl_ctx)) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+   
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncurl_prog_query(uint8_t *cmd_name)
+{
+    if (!bncurl_ctx) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    uint64_t bytes_transferred = 0;
+    uint64_t bytes_total = 0;
+    
+    bncurl_get_progress(bncurl_ctx, &bytes_transferred, &bytes_total);
+
+    uint8_t buffer[128] = {0};
+    // Use %u for 32-bit values to ensure compatibility
+    snprintf((char *)buffer, 128, "+BNCURL_PROG:%u/%u\r\n", 
+             (uint32_t)bytes_transferred, (uint32_t)bytes_total);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
-    {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL}
+    {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
+    {"+BNCURL_STOP", NULL, at_bncurl_stop_query, NULL, NULL},
+    {"+BNCURL_PROG", NULL, at_bncurl_prog_query, NULL, NULL}
 };
 
 bool esp_at_custom_cmd_register(void)
