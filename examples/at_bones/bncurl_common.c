@@ -341,6 +341,70 @@ int bncurl_common_progress_callback(void *clientp, curl_off_t dltotal, curl_off_
     return 0; // Continue
 }
 
+// Verbose debug callback to stream curl debug information to UART
+int bncurl_common_debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr)
+{
+    bncurl_common_context_t *common_ctx = (bncurl_common_context_t *)userptr;
+    
+    // Only process if verbose mode is enabled
+    if (!common_ctx || !common_ctx->ctx || !common_ctx->ctx->params.verbose) {
+        return 0;
+    }
+    
+    // Create a debug message prefix based on the info type
+    const char *prefix = "";
+    switch (type) {
+        case CURLINFO_TEXT:
+            prefix = "* ";
+            break;
+        case CURLINFO_HEADER_IN:
+            prefix = "< ";
+            break;
+        case CURLINFO_HEADER_OUT:
+            prefix = "> ";
+            break;
+        case CURLINFO_DATA_IN:
+            prefix = "<< ";
+            break;
+        case CURLINFO_DATA_OUT:
+            prefix = ">> ";
+            break;
+        case CURLINFO_SSL_DATA_IN:
+        case CURLINFO_SSL_DATA_OUT:
+            // Skip SSL data to avoid overwhelming output
+            return 0;
+        default:
+            return 0;
+    }
+    
+    // Process data line by line to add proper formatting
+    char *data_copy = malloc(size + 1);
+    if (!data_copy) {
+        return 0;
+    }
+    
+    memcpy(data_copy, data, size);
+    data_copy[size] = '\0';
+    
+    // Split into lines and send each with prefix
+    char *line = strtok(data_copy, "\r\n");
+    while (line != NULL) {
+        if (strlen(line) > 0) {
+            // Create formatted debug line
+            char debug_line[BNCURL_MAX_VERBOSE_LINE_LENGTH + 32];
+            int line_len = snprintf(debug_line, sizeof(debug_line), "+VERBOSE:%s%s\r\n", prefix, line);
+            
+            if (line_len > 0 && line_len < sizeof(debug_line)) {
+                esp_at_port_write_data((uint8_t *)debug_line, line_len);
+            }
+        }
+        line = strtok(NULL, "\r\n");
+    }
+    
+    free(data_copy);
+    return 0;
+}
+
 bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_t *stream, 
                                    const char *method)
 {
@@ -497,6 +561,14 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, bncurl_common_progress_callback);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &common_ctx);
     
+    // Set verbose debug callback if -v parameter is enabled
+    if (ctx->params.verbose) {
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, bncurl_common_debug_callback);
+        curl_easy_setopt(curl, CURLOPT_DEBUGDATA, &common_ctx);
+        ESP_LOGI(TAG, "Verbose mode enabled - debug info will be streamed to UART");
+    }
+    
     // Follow redirects
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, BNCURL_MAX_REDIRECTS);
@@ -632,6 +704,70 @@ static size_t head_header_callback_for_length(char *buffer, size_t size, size_t 
     return total_size;
 }
 
+// Simple debug callback for content length HEAD requests  
+static int content_length_debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr)
+{
+    bncurl_context_t *ctx = (bncurl_context_t *)userptr;
+    
+    // Only process if verbose mode is enabled
+    if (!ctx || !ctx->params.verbose) {
+        return 0;
+    }
+    
+    // Create a debug message prefix based on the info type
+    const char *prefix = "";
+    switch (type) {
+        case CURLINFO_TEXT:
+            prefix = "* ";
+            break;
+        case CURLINFO_HEADER_IN:
+            prefix = "< ";
+            break;
+        case CURLINFO_HEADER_OUT:
+            prefix = "> ";
+            break;
+        case CURLINFO_DATA_IN:
+            prefix = "<< ";
+            break;
+        case CURLINFO_DATA_OUT:
+            prefix = ">> ";
+            break;
+        case CURLINFO_SSL_DATA_IN:
+        case CURLINFO_SSL_DATA_OUT:
+            // Skip SSL data to avoid overwhelming output
+            return 0;
+        default:
+            return 0;
+    }
+    
+    // Process data line by line to add proper formatting
+    char *data_copy = malloc(size + 1);
+    if (!data_copy) {
+        return 0;
+    }
+    
+    memcpy(data_copy, data, size);
+    data_copy[size] = '\0';
+    
+    // Split into lines and send each with prefix
+    char *line = strtok(data_copy, "\r\n");
+    while (line != NULL) {
+        if (strlen(line) > 0) {
+            // Create formatted debug line for content length HEAD request
+            char debug_line[BNCURL_MAX_VERBOSE_LINE_LENGTH + 32];
+            int line_len = snprintf(debug_line, sizeof(debug_line), "+VERBOSE:%s%s\r\n", prefix, line);
+            
+            if (line_len > 0 && line_len < sizeof(debug_line)) {
+                esp_at_port_write_data((uint8_t *)debug_line, line_len);
+            }
+        }
+        line = strtok(NULL, "\r\n");
+    }
+    
+    free(data_copy);
+    return 0;
+}
+
 bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_length)
 {
     if (!ctx || !content_length) {
@@ -683,6 +819,14 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     
     // Set User-Agent
     curl_easy_setopt(curl, CURLOPT_USERAGENT, BNCURL_DEFAULT_USER_AGENT);
+    
+    // Configure verbose debug output if -v parameter is enabled
+    if (ctx->params.verbose) {
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, content_length_debug_callback);
+        curl_easy_setopt(curl, CURLOPT_DEBUGDATA, ctx);
+        ESP_LOGI(TAG, "Verbose mode enabled for content length HEAD request");
+    }
     
     // Configure DNS and connection settings (longer timeouts for HTTPS)
     curl_easy_setopt(curl, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1,208.67.222.222");

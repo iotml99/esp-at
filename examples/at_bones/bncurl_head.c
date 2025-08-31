@@ -69,6 +69,70 @@ static size_t head_collector_callback(char *buffer, size_t size, size_t nitems, 
     return total_size; // Return original size to continue processing
 }
 
+// Simple verbose debug callback for HEAD requests
+static int head_debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr)
+{
+    bncurl_context_t *ctx = (bncurl_context_t *)userptr;
+    
+    // Only process if verbose mode is enabled
+    if (!ctx || !ctx->params.verbose) {
+        return 0;
+    }
+    
+    // Create a debug message prefix based on the info type
+    const char *prefix = "";
+    switch (type) {
+        case CURLINFO_TEXT:
+            prefix = "* ";
+            break;
+        case CURLINFO_HEADER_IN:
+            prefix = "< ";
+            break;
+        case CURLINFO_HEADER_OUT:
+            prefix = "> ";
+            break;
+        case CURLINFO_DATA_IN:
+            prefix = "<< ";
+            break;
+        case CURLINFO_DATA_OUT:
+            prefix = ">> ";
+            break;
+        case CURLINFO_SSL_DATA_IN:
+        case CURLINFO_SSL_DATA_OUT:
+            // Skip SSL data to avoid overwhelming output
+            return 0;
+        default:
+            return 0;
+    }
+    
+    // Process data line by line to add proper formatting
+    char *data_copy = malloc(size + 1);
+    if (!data_copy) {
+        return 0;
+    }
+    
+    memcpy(data_copy, data, size);
+    data_copy[size] = '\0';
+    
+    // Split into lines and send each with prefix
+    char *line = strtok(data_copy, "\r\n");
+    while (line != NULL) {
+        if (strlen(line) > 0) {
+            // Create formatted debug line
+            char debug_line[BNCURL_MAX_VERBOSE_LINE_LENGTH + 32];
+            int line_len = snprintf(debug_line, sizeof(debug_line), "+VERBOSE:%s%s\r\n", prefix, line);
+            
+            if (line_len > 0 && line_len < sizeof(debug_line)) {
+                esp_at_port_write_data((uint8_t *)debug_line, line_len);
+            }
+        }
+        line = strtok(NULL, "\r\n");
+    }
+    
+    free(data_copy);
+    return 0;
+}
+
 bool bncurl_execute_head_request(bncurl_context_t *ctx)
 {
     if (!ctx) {
@@ -95,6 +159,14 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx)
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "ESP32-BN-Module/1.0");
+    
+    // Configure verbose debug output if -v parameter is enabled
+    if (ctx->params.verbose) {
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, head_debug_callback);
+        curl_easy_setopt(curl, CURLOPT_DEBUGDATA, ctx);
+        ESP_LOGI(TAG, "Verbose mode enabled for HEAD request");
+    }
     
     // Configure HTTPS settings if needed
     bool is_https = (strncmp(ctx->params.url, "https://", 8) == 0);
@@ -129,10 +201,10 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx)
     // Output +LEN marker with header length
     char len_marker[64];
     if (header_length == SIZE_MAX) {
-        snprintf(len_marker, sizeof(len_marker), "+LEN:-1\r\n");
+        snprintf(len_marker, sizeof(len_marker), "+LEN:-1,\r\n");
         ESP_LOGI(TAG, "Header length unknown, sending +LEN:-1");
     } else {
-        snprintf(len_marker, sizeof(len_marker), "+LEN:%u\r\n", (unsigned int)header_length);
+        snprintf(len_marker, sizeof(len_marker), "+LEN:%u,\r\n", (unsigned int)header_length);
         ESP_LOGI(TAG, "Sending +LEN:%u for headers", (unsigned int)header_length);
     }
     esp_at_port_write_data((uint8_t *)len_marker, strlen(len_marker));
