@@ -47,7 +47,12 @@ bool bncurl_execute_get_request(bncurl_context_t *ctx)
     bncurl_get_context_t get_ctx;
     memset(&get_ctx, 0, sizeof(get_ctx));
     get_ctx.ctx = ctx;
-    bncurl_stream_init(&get_ctx.stream, ctx);  // Pass context for file path
+    
+    // Check if this is a range request
+    bool is_range_request = (strlen(ctx->params.range) > 0);
+    
+    // Initialize streaming with range support
+    bncurl_stream_init_with_range(&get_ctx.stream, ctx, is_range_request);
     
     // Set expected content length if available (ignore SIZE_MAX which indicates unknown)
     if (expected_content_length != SIZE_MAX) {
@@ -56,7 +61,11 @@ bool bncurl_execute_get_request(bncurl_context_t *ctx)
     }
     
     if (strlen(ctx->params.data_download) > 0) {
-        ESP_LOGI(TAG, "Downloading to file: %s", ctx->params.data_download);
+        if (is_range_request) {
+            ESP_LOGI(TAG, "Range download to file: %s (bytes %s)", ctx->params.data_download, ctx->params.range);
+        } else {
+            ESP_LOGI(TAG, "Downloading to file: %s", ctx->params.data_download);
+        }
     } else {
         ESP_LOGI(TAG, "Streaming to UART");
     }

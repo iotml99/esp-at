@@ -683,6 +683,21 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         for (int i = 0; i < ctx->params.header_count; i++) {
             headers = curl_slist_append(headers, ctx->params.headers[i]);
         }
+    }
+    
+    // Add Range header if -r parameter is provided (GET requests only)
+    if (strcmp(method, "GET") == 0 && strlen(ctx->params.range) > 0) {
+        char range_header[128];
+        snprintf(range_header, sizeof(range_header), "Range: bytes=%s", ctx->params.range);
+        headers = curl_slist_append(headers, range_header);
+        ESP_LOGI(TAG, "Added Range header: %s", range_header);
+        
+        // Log range download information
+        ESP_LOGI(TAG, "Range download requested: %s", ctx->params.range);
+        ESP_LOGI(TAG, "Data will be APPENDED to file: %s", ctx->params.data_download);
+    }
+    
+    if (headers) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
     

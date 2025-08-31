@@ -32,6 +32,7 @@ typedef struct {
     size_t bytes_streamed;  // Total bytes already streamed
     FILE *output_file;      // File handle for download (NULL for UART output)
     char *file_path;        // Path to output file (NULL for UART output)
+    bool is_range_request;  // True if this is a range request
 } bncurl_stream_context_t;
 
 /**
@@ -65,6 +66,15 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx);
  * @param ctx BNCURL context containing download file path (optional)
  */
 void bncurl_stream_init(bncurl_stream_context_t *stream_ctx, bncurl_context_t *ctx);
+
+/**
+ * @brief Initialize streaming context with range support
+ * 
+ * @param stream_ctx Streaming context to initialize
+ * @param ctx BNCURL context containing download file path and range parameters
+ * @param is_range_request True if this is a range request requiring append mode
+ */
+void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_context_t *ctx, bool is_range_request);
 
 /**
  * @brief Stream buffer data to output (UART or file)

@@ -270,11 +270,8 @@ static bool validate_param_combinations(const bncurl_params_t *params)
         return false;
     }
     
-    // Range requires data download
-    if (strlen(params->range) > 0 && strlen(params->data_download) == 0) {
-        printf("ERROR: Range (-r) requires data download (-dd)\n");
-        return false;
-    }
+    // Range is supported for both file download (-dd) and UART streaming
+    // No additional validation needed - range works with both modes
     
     // POST can optionally have data upload, but it's not required for empty POST
     // Empty POST requests (without -du) are valid and will send no body
@@ -543,6 +540,29 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             }
             strncpy(params->range, (char *)param_str, BNCURL_MAX_RANGE_STRING_LENGTH);
             params->range[BNCURL_MAX_RANGE_STRING_LENGTH] = '\0';
+            
+            // Basic range format validation (should be "start-end")
+            char *dash = strchr(params->range, '-');
+            if (!dash || dash == params->range || dash == params->range + strlen(params->range) - 1) {
+                printf("ERROR: Invalid range format. Use: start-end (e.g., 0-2097151)\n");
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            // Validate that start and end are numbers
+            char *endptr;
+            long start = strtol(params->range, &endptr, 10);
+            if (endptr != dash || start < 0) {
+                printf("ERROR: Invalid range start value. Must be non-negative number\n");
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            long end = strtol(dash + 1, &endptr, 10);
+            if (*endptr != '\0' || end < start) {
+                printf("ERROR: Invalid range end value. Must be >= start value\n");
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            ESP_LOGI(TAG, "Range validated: %ld-%ld (%ld bytes)", start, end, end - start + 1);
             
         } else if (strcmp(option, "-v") == 0) {
             // Verbose option (no additional parameter)

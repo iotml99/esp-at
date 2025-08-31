@@ -15,6 +15,12 @@ static const char *TAG = "BNCURL_STREAM";
 
 void bncurl_stream_init(bncurl_stream_context_t *stream_ctx, bncurl_context_t *ctx)
 {
+    // Call the range-aware version with is_range_request = false for backward compatibility
+    bncurl_stream_init_with_range(stream_ctx, ctx, false);
+}
+
+void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_context_t *ctx, bool is_range_request)
+{
     if (!stream_ctx) {
         return;
     }
@@ -24,19 +30,50 @@ void bncurl_stream_init(bncurl_stream_context_t *stream_ctx, bncurl_context_t *c
     stream_ctx->streaming_buffer = -1;
     stream_ctx->output_file = NULL;
     stream_ctx->file_path = NULL;
+    stream_ctx->is_range_request = is_range_request;
     
     // Check if we have a download file path
     if (ctx && strlen(ctx->params.data_download) > 0) {
         // Set up file output
         stream_ctx->file_path = ctx->params.data_download;
-        stream_ctx->output_file = fopen(stream_ctx->file_path, "wb");
+        
+        // Choose file open mode based on whether this is a range request
+        const char *file_mode;
+        if (is_range_request) {
+            file_mode = "ab";  // Append mode for range downloads
+            ESP_LOGI(TAG, "Opening file in APPEND mode for range download: %s", stream_ctx->file_path);
+        } else {
+            file_mode = "wb";  // Write mode for regular downloads (overwrites)
+            ESP_LOGI(TAG, "Opening file in WRITE mode for regular download: %s", stream_ctx->file_path);
+        }
+        
+        stream_ctx->output_file = fopen(stream_ctx->file_path, file_mode);
         if (!stream_ctx->output_file) {
-            ESP_LOGE(TAG, "Failed to open file for writing: %s", stream_ctx->file_path);
+            ESP_LOGE(TAG, "Failed to open file for %s: %s", is_range_request ? "appending" : "writing", stream_ctx->file_path);
             stream_ctx->file_path = NULL;
         } else {
-            ESP_LOGI(TAG, "Opened file for download: %s", stream_ctx->file_path);
+            ESP_LOGI(TAG, "Opened file for download (%s mode): %s", is_range_request ? "append" : "write", stream_ctx->file_path);
+            
+            // For range requests, log the current file size
+            if (is_range_request) {
+                fseek(stream_ctx->output_file, 0, SEEK_END);
+                long current_size = ftell(stream_ctx->output_file);
+                ESP_LOGI(TAG, "Range download: existing file size = %ld bytes", current_size);
+                
+                // Send info to UART for host awareness
+                char size_info[64];
+                snprintf(size_info, sizeof(size_info), "+RANGE_INFO:existing_size=%ld\r\n", current_size);
+                esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
+            }
         }
+    } else if (is_range_request) {
+        // Range request streaming to UART - send range info  
+        ESP_LOGI(TAG, "Range request will stream to UART");
+        char size_info[64];
+        snprintf(size_info, sizeof(size_info), "+RANGE_INFO:uart_stream=true\r\n");
+        esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
     }
+    
     
     // Initialize buffers
     for (int i = 0; i < BNCURL_STREAM_BUFFER_COUNT; i++) {
@@ -45,9 +82,10 @@ void bncurl_stream_init(bncurl_stream_context_t *stream_ctx, bncurl_context_t *c
         stream_ctx->buffers[i].is_streaming = false;
     }
     
-    ESP_LOGI(TAG, "Stream context initialized with %d buffers of %d bytes each, output: %s", 
+    ESP_LOGI(TAG, "Stream context initialized with %d buffers of %d bytes each, output: %s (%s mode)", 
              BNCURL_STREAM_BUFFER_COUNT, BNCURL_STREAM_BUFFER_SIZE,
-             stream_ctx->file_path ? stream_ctx->file_path : "UART");
+             stream_ctx->file_path ? stream_ctx->file_path : "UART",
+             is_range_request ? "append" : "write");
 }
 
 bool bncurl_stream_buffer_to_output(bncurl_stream_context_t *stream_ctx, int buffer_index)
@@ -118,16 +156,32 @@ void bncurl_stream_finalize(bncurl_stream_context_t *stream_ctx, bool success)
     
     // Close file if it was opened
     if (stream_ctx->output_file) {
+        // Get final file size before closing
+        fseek(stream_ctx->output_file, 0, SEEK_END);
+        long final_size = ftell(stream_ctx->output_file);
+        
         fclose(stream_ctx->output_file);
         stream_ctx->output_file = NULL;
         
         if (success) {
-            ESP_LOGI(TAG, "File download completed successfully: %s (%u bytes)", 
-                     stream_ctx->file_path, (unsigned int)stream_ctx->bytes_streamed);
+            ESP_LOGI(TAG, "File download completed successfully: %s", stream_ctx->file_path);
+            ESP_LOGI(TAG, "  Bytes written this request: %u", (unsigned int)stream_ctx->bytes_streamed);
+            ESP_LOGI(TAG, "  Total file size now: %ld bytes", final_size);
+            
+            // Send final size info to UART
+            char final_info[64];
+            snprintf(final_info, sizeof(final_info), "+RANGE_FINAL:file_size=%ld\r\n", final_size);
+            esp_at_port_write_data((uint8_t *)final_info, strlen(final_info));
         } else {
             ESP_LOGE(TAG, "File download failed: %s (%u bytes written)", 
                      stream_ctx->file_path, (unsigned int)stream_ctx->bytes_streamed);
         }
+    } else if (stream_ctx->is_range_request && success) {
+        // Range request streaming to UART - send completion info
+        ESP_LOGI(TAG, "Range download to UART completed: %u bytes streamed", (unsigned int)stream_ctx->bytes_streamed);
+        char final_info[64];
+        snprintf(final_info, sizeof(final_info), "+RANGE_FINAL:uart_bytes=%u\r\n", (unsigned int)stream_ctx->bytes_streamed);
+        esp_at_port_write_data((uint8_t *)final_info, strlen(final_info));
     }
     
     // Send completion message (always to UART for status)

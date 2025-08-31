@@ -141,16 +141,17 @@ static uint8_t at_test_cmd_test(uint8_t *cmd_name)
         "  -dd <@file>         Download to file\r\n"
         "  -c <@file>          Save cookies to file\r\n"
         "  -b <@file>          Send cookies from file\r\n"
-        "  -r <start-end>      Range request (GET only)\r\n"
+        "  -r <start-end>      Range request (GET only, optional with -dd)\r\n"
         "  -v                  Verbose debug output\r\n"
         "\r\n"
-        "Cookie Usage:\r\n"
-        "  -c \"@cookies.txt\"   Save cookies to file & stream to UART\r\n"
-        "  -b \"@cookies.txt\"   Load cookies from file for request\r\n"
+        "Range Downloads:\r\n"
+        "  -r \"0-2097151\"       Download bytes 0-2097151 (to file or UART)\r\n"
+        "  -r \"2097152-4194303\" Download next 2MB chunk (to file or UART)\r\n"
+        "  With -dd: appends to file | Without -dd: streams to UART\r\n"
         "\r\n"
         "Examples:\r\n"
-        "  AT+BNCURL=\"GET\",\"https://httpbin.org/cookies\",\"-b\",\"@cookies.txt\"\r\n"
-        "  AT+BNCURL=\"POST\",\"https://httpbin.org/cookies/set/test/value\",\"-c\",\"@cookies.txt\"\r\n");
+        "  AT+BNCURL=\"GET\",\"http://example.com/file.mp3\",\"-dd\",\"@file.mp3\",\"-r\",\"0-2097151\"\r\n"
+        "  AT+BNCURL=\"GET\",\"http://example.com/file.mp3\",\"-r\",\"0-2097151\"\r\n");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
 
     return ESP_AT_RESULT_CODE_OK;
