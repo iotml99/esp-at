@@ -8,6 +8,10 @@
 #include "bncurl_config.h"
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include "esp_at.h"
 #include "esp_log.h"
 
@@ -28,7 +32,7 @@ void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_c
     memset(stream_ctx, 0, sizeof(bncurl_stream_context_t));
     stream_ctx->active_buffer = 0;
     stream_ctx->streaming_buffer = -1;
-    stream_ctx->output_file = NULL;
+    stream_ctx->output_fd = -1;
     stream_ctx->file_path = NULL;
     stream_ctx->is_range_request = is_range_request;
     
@@ -37,34 +41,39 @@ void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_c
         // Set up file output
         stream_ctx->file_path = ctx->params.data_download;
         
-        // Choose file open mode based on whether this is a range request
-        const char *file_mode;
+        // Choose file open flags based on whether this is a range request
+        int open_flags;
         if (is_range_request) {
-            file_mode = "ab";  // Append mode for range downloads
+            open_flags = O_WRONLY | O_CREAT | O_APPEND;  // Append mode for range downloads
             ESP_LOGI(TAG, "Opening file in APPEND mode for range download: %s", stream_ctx->file_path);
         } else {
-            file_mode = "wb";  // Write mode for regular downloads (overwrites)
+            open_flags = O_WRONLY | O_CREAT | O_TRUNC;   // Write mode for regular downloads (overwrites)
             ESP_LOGI(TAG, "Opening file in WRITE mode for regular download: %s", stream_ctx->file_path);
         }
         
-        stream_ctx->output_file = fopen(stream_ctx->file_path, file_mode);
-        if (!stream_ctx->output_file) {
-            ESP_LOGE(TAG, "Failed to open file for %s: %s", is_range_request ? "appending" : "writing", stream_ctx->file_path);
+        stream_ctx->output_fd = open(stream_ctx->file_path, open_flags, 0644);
+        if (stream_ctx->output_fd < 0) {
+            ESP_LOGE(TAG, "Failed to open file for %s: %s (errno: %d)", 
+                     is_range_request ? "appending" : "writing", stream_ctx->file_path, errno);
             stream_ctx->file_path = NULL;
         } else {
             ESP_LOGI(TAG, "Opened file for download (%s mode): %s", is_range_request ? "append" : "write", stream_ctx->file_path);
             
             // For range requests, log the current file size
             if (is_range_request) {
-                fseek(stream_ctx->output_file, 0, SEEK_END);
-                long current_size = ftell(stream_ctx->output_file);
-                ESP_LOGI(TAG, "Range download: existing file size = %ld bytes", current_size);
-                
-                // For file range downloads, only send info if appending to existing file
-                if (current_size > 0) {
-                    char size_info[64];
-                    snprintf(size_info, sizeof(size_info), "+RANGE_INFO:existing_size=%ld\r\n", current_size);
-                    esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
+                struct stat file_stat;
+                if (fstat(stream_ctx->output_fd, &file_stat) == 0) {
+                    long current_size = file_stat.st_size;
+                    ESP_LOGI(TAG, "Range download: existing file size = %ld bytes", current_size);
+                    
+                    // For file range downloads, only send info if appending to existing file
+                    if (current_size > 0) {
+                        char size_info[64];
+                        snprintf(size_info, sizeof(size_info), "+RANGE_INFO:existing_size=%ld\r\n", current_size);
+                        esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Could not get file size for range download: errno %d", errno);
                 }
             }
         }
@@ -105,17 +114,17 @@ bool bncurl_stream_buffer_to_output(bncurl_stream_context_t *stream_ctx, int buf
     
     bool success = false;
     
-    if (stream_ctx->output_file) {
-        // Write to file
-        size_t written = fwrite(buffer->data, 1, buffer->size, stream_ctx->output_file);
-        if (written == buffer->size) {
-            // Flush to ensure data is written to disk
-            fflush(stream_ctx->output_file);
+    if (stream_ctx->output_fd >= 0) {
+        // Write to file using POSIX write
+        ssize_t written = write(stream_ctx->output_fd, buffer->data, buffer->size);
+        if (written == (ssize_t)buffer->size) {
+            // Force data to be written to disk (equivalent to fflush + fsync)
+            fsync(stream_ctx->output_fd);
             success = true;
             ESP_LOGI(TAG, "Wrote %u bytes to file: %s", (unsigned int)buffer->size, stream_ctx->file_path);
         } else {
-            ESP_LOGE(TAG, "Failed to write to file: %s (wrote %u of %u bytes)", 
-                     stream_ctx->file_path, (unsigned int)written, (unsigned int)buffer->size);
+            ESP_LOGE(TAG, "Failed to write to file: %s (wrote %d of %u bytes, errno: %d)", 
+                     stream_ctx->file_path, (int)written, (unsigned int)buffer->size, errno);
         }
     } else {
         // Write to UART (original behavior)
@@ -152,21 +161,26 @@ void bncurl_stream_finalize(bncurl_stream_context_t *stream_ctx, bool success)
     }
     
     // Close file if it was opened
-    if (stream_ctx->output_file) {
+    if (stream_ctx->output_fd >= 0) {
         // Get final file size before closing
-        fseek(stream_ctx->output_file, 0, SEEK_END);
-        long final_size = ftell(stream_ctx->output_file);
+        struct stat file_stat;
+        long final_size = -1;
+        if (fstat(stream_ctx->output_fd, &file_stat) == 0) {
+            final_size = file_stat.st_size;
+        }
         
-        fclose(stream_ctx->output_file);
-        stream_ctx->output_file = NULL;
+        close(stream_ctx->output_fd);
+        stream_ctx->output_fd = -1;
         
         if (success) {
             ESP_LOGI(TAG, "File download completed successfully: %s", stream_ctx->file_path);
             ESP_LOGI(TAG, "  Bytes written this request: %u", (unsigned int)stream_ctx->bytes_streamed);
-            ESP_LOGI(TAG, "  Total file size now: %ld bytes", final_size);
+            if (final_size >= 0) {
+                ESP_LOGI(TAG, "  Total file size now: %ld bytes", final_size);
+            }
             
             // Send final size info to UART only for range requests
-            if (stream_ctx->is_range_request) {
+            if (stream_ctx->is_range_request && final_size >= 0) {
                 char final_info[64];
                 snprintf(final_info, sizeof(final_info), "+RANGE_FINAL:file_size=%ld\r\n", final_size);
                 esp_at_port_write_data((uint8_t *)final_info, strlen(final_info));

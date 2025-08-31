@@ -30,7 +30,7 @@ typedef struct {
     int streaming_buffer;   // Currently streaming buffer (-1 if none)
     size_t total_size;      // Total content size (if known)
     size_t bytes_streamed;  // Total bytes already streamed
-    FILE *output_file;      // File handle for download (NULL for UART output)
+    int output_fd;          // File descriptor for download (-1 for UART output)
     char *file_path;        // Path to output file (NULL for UART output)
     bool is_range_request;  // True if this is a range request
 } bncurl_stream_context_t;

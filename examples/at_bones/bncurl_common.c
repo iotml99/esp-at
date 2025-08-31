@@ -9,11 +9,16 @@
 #include "bncurl_config.h"
 #include "bncurl_cookies.h"
 #include "bncert_manager.h"
+#include "bnkill.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <time.h>
 #include "esp_at.h"
 #include "esp_log.h"
@@ -30,6 +35,31 @@ size_t bncurl_combined_header_callback(char *buffer, size_t size, size_t nitems,
     
     // First handle regular header processing (content-length, HEAD streaming, etc.)
     size_t result = bncurl_common_header_callback(buffer, size, nitems, userdata);
+    
+    // Then handle Date header for kill switch (if not already captured)
+    if (common_ctx && !common_ctx->http_date_header) {
+        if (strncasecmp(buffer, "Date:", 5) == 0) {
+            char *date_start = buffer + 5;
+            while (*date_start == ' ' || *date_start == '\t') date_start++; // Skip whitespace
+            
+            // Create null-terminated date string
+            size_t date_len = total_size - (date_start - buffer);
+            
+            // Remove trailing CRLF
+            while (date_len > 0 && (date_start[date_len-1] == '\r' || date_start[date_len-1] == '\n')) {
+                date_len--;
+            }
+            
+            if (date_len > 0) {
+                common_ctx->http_date_header = malloc(date_len + 1);
+                if (common_ctx->http_date_header) {
+                    memcpy(common_ctx->http_date_header, date_start, date_len);
+                    common_ctx->http_date_header[date_len] = '\0';
+                    ESP_LOGI(TAG, "Captured HTTP Date header: %s", common_ctx->http_date_header);
+                }
+            }
+        }
+    }
     
     // Then handle cookie processing if cookie context is available
     if (common_ctx && common_ctx->cookies) {
@@ -477,6 +507,7 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     common_ctx.ctx = ctx;
     common_ctx.stream = stream;
     common_ctx.cookies = has_cookie_save ? &cookie_ctx : NULL;
+    common_ctx.http_date_header = NULL;  // Initialize HTTP Date header to NULL
     
     // Initialize curl
     curl = curl_easy_init();
@@ -548,28 +579,40 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
                 }
                 
             } else if (ctx->params.data_upload[0] == '@') {
-                // File upload - read from file
+                // File upload - read from file using POSIX operations
                 const char *file_path = ctx->params.data_upload + 1; // Skip @
                 ESP_LOGI(TAG, "POST: Uploading from file: %s", file_path);
                 
-                FILE *fp = fopen(file_path, "rb");
-                if (fp) {
-                    // Get file size
-                    fseek(fp, 0, SEEK_END);
-                    long file_size = ftell(fp);
-                    fseek(fp, 0, SEEK_SET);
-                    
-                    // Read file content
-                    post_data = malloc(file_size);
-                    if (post_data) {
-                        size_t read_size = fread(post_data, 1, file_size, fp);
-                        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
-                        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, read_size);
-                        ESP_LOGI(TAG, "POST: File uploaded, size: %zu bytes", read_size);
+                int fd = open(file_path, O_RDONLY);
+                if (fd >= 0) {
+                    // Get file size using fstat
+                    struct stat file_stat;
+                    if (fstat(fd, &file_stat) == 0) {
+                        long file_size = file_stat.st_size;
+                        
+                        // Read file content
+                        post_data = malloc(file_size);
+                        if (post_data) {
+                            ssize_t read_size = read(fd, post_data, file_size);
+                            if (read_size == file_size) {
+                                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
+                                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, read_size);
+                                ESP_LOGI(TAG, "POST: File uploaded, size: %d bytes", (int)read_size);
+                            } else {
+                                ESP_LOGE(TAG, "POST: Failed to read complete file: %d/%ld bytes (errno: %d)", 
+                                         (int)read_size, file_size, errno);
+                                free(post_data);
+                                post_data = NULL;
+                            }
+                        } else {
+                            ESP_LOGE(TAG, "POST: Failed to allocate memory for file: %ld bytes", file_size);
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "POST: Failed to get file stats: %s (errno: %d)", file_path, errno);
                     }
-                    fclose(fp);
+                    close(fd);
                 } else {
-                    ESP_LOGE(TAG, "POST: Failed to open file: %s", file_path);
+                    ESP_LOGE(TAG, "POST: Failed to open file: %s (errno: %d)", file_path, errno);
                 }
             } else if (ctx->params.is_numeric_upload) {
                 // Should not reach here - numeric upload data should have been collected already
@@ -828,6 +871,12 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     // Perform the request
     res = curl_easy_perform(curl);
     
+    // Update kill switch with HTTP Date header if available
+    if (common_ctx.http_date_header) {
+        bnkill_check_expiry(common_ctx.http_date_header);
+        ESP_LOGI(TAG, "Updated kill switch with server date: %s", common_ctx.http_date_header);
+    }
+    
     if (res == CURLE_OK) {
         // Get response code
         long response_code;
@@ -883,6 +932,12 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         free(post_data);
     }
     
+    // Clean up HTTP date header if allocated
+    if (common_ctx.http_date_header) {
+        free(common_ctx.http_date_header);
+        common_ctx.http_date_header = NULL;
+    }
+    
     // Clean up cookies if saving was enabled
     if (has_cookie_save) {
         bncurl_cookies_cleanup_context(&cookie_ctx);
@@ -921,6 +976,55 @@ static size_t head_header_callback_for_length(char *buffer, size_t size, size_t 
         head_response->content_length = strtoul(length_str, NULL, 10);
         head_response->found = true;
         ESP_LOGI(TAG, "HEAD request detected Content-Length: %u bytes", (unsigned int)head_response->content_length);
+    }
+    
+    return total_size;
+}
+
+// Combined header callback for HEAD requests that captures both Content-Length and HTTP Date
+typedef struct {
+    head_response_t *head_response;
+    bncurl_common_context_t *common_ctx;
+} head_combined_context_t;
+
+static size_t head_combined_header_callback(char *buffer, size_t size, size_t nitems, void *userdata)
+{
+    head_combined_context_t *ctx = (head_combined_context_t *)userdata;
+    size_t total_size = size * nitems;
+    
+    // Handle Content-Length
+    if (strncasecmp(buffer, "Content-Length:", 15) == 0) {
+        char *length_str = buffer + 15;
+        while (*length_str == ' ' || *length_str == '\t') length_str++; // Skip whitespace
+        
+        ctx->head_response->content_length = strtoul(length_str, NULL, 10);
+        ctx->head_response->found = true;
+        ESP_LOGI(TAG, "HEAD request detected Content-Length: %u bytes", (unsigned int)ctx->head_response->content_length);
+    }
+    
+    // Handle HTTP Date header for kill switch (if not already captured)
+    if (ctx->common_ctx && !ctx->common_ctx->http_date_header) {
+        if (strncasecmp(buffer, "Date:", 5) == 0) {
+            char *date_start = buffer + 5;
+            while (*date_start == ' ' || *date_start == '\t') date_start++; // Skip whitespace
+            
+            // Create null-terminated date string
+            size_t date_len = total_size - (date_start - buffer);
+            
+            // Remove trailing CRLF
+            while (date_len > 0 && (date_start[date_len-1] == '\r' || date_start[date_len-1] == '\n')) {
+                date_len--;
+            }
+            
+            if (date_len > 0) {
+                ctx->common_ctx->http_date_header = malloc(date_len + 1);
+                if (ctx->common_ctx->http_date_header) {
+                    memcpy(ctx->common_ctx->http_date_header, date_start, date_len);
+                    ctx->common_ctx->http_date_header[date_len] = '\0';
+                    ESP_LOGI(TAG, "Captured HTTP Date header: %s", ctx->common_ctx->http_date_header);
+                }
+            }
+        }
     }
     
     return total_size;
@@ -997,15 +1101,26 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
         *content_length = SIZE_MAX; // Use SIZE_MAX to indicate -1
         return false;
     }
-    
+
     CURL *curl;
     CURLcode res;
     head_response_t head_response = {0, false};
     bool success = false;
     
-    *content_length = SIZE_MAX; // Initialize to SIZE_MAX (will be converted to -1)
+    // Create minimal common context for HTTP Date header capture
+    bncurl_common_context_t common_ctx;
+    common_ctx.ctx = ctx;
+    common_ctx.stream = NULL;
+    common_ctx.cookies = NULL;
+    common_ctx.http_date_header = NULL;
     
-    // Check if this is an HTTPS request
+    // Create combined context for the header callback
+    head_combined_context_t head_combined_ctx = {
+        .head_response = &head_response,
+        .common_ctx = &common_ctx
+    };
+
+    *content_length = SIZE_MAX; // Initialize to SIZE_MAX (will be converted to -1)    // Check if this is an HTTPS request
     bool is_https = (strncmp(ctx->params.url, "https://", 8) == 0);
     
     // Initialize curl for HEAD request
@@ -1034,9 +1149,9 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/sec minimum speed
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout * 5); // Safety net
     
-    // Set header callback to capture Content-Length
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, head_header_callback_for_length);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &head_response);
+    // Set header callback to capture Content-Length and HTTP Date
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, head_combined_header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &head_combined_ctx);
     
     // Follow redirects
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -1101,6 +1216,12 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     ESP_LOGI(TAG, "Executing HEAD request with %ld second server response timeout...", timeout);
     res = curl_easy_perform(curl);
     
+    // Update kill switch with HTTP Date header if available
+    if (common_ctx.http_date_header) {
+        bnkill_check_expiry(common_ctx.http_date_header);
+        ESP_LOGI(TAG, "Updated kill switch with server date: %s", common_ctx.http_date_header);
+    }
+    
     if (res == CURLE_OK) {
         // Get response code
         long response_code;
@@ -1130,6 +1251,12 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     // Cleanup
     if (headers) {
         curl_slist_free_all(headers);
+    }
+    
+    // Clean up HTTP date header if allocated
+    if (common_ctx.http_date_header) {
+        free(common_ctx.http_date_header);
+        common_ctx.http_date_header = NULL;
     }
     
     // Cleanup certificate data allocated during SSL configuration

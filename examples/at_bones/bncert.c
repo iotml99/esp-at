@@ -16,8 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 static const char *TAG = "BNCERT";
 
@@ -269,23 +271,27 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
     bncert_result_t result = BNCERT_RESULT_OK;
 
     if (params->source_type == BNCERT_SOURCE_FILE) {
-        // Read data from file
+        // Read data from file using POSIX operations
         ESP_LOGI(TAG, "Reading certificate from file: %s", params->file_path);
 
-        FILE *file = fopen(params->file_path, "rb");
-        if (!file) {
-            ESP_LOGE(TAG, "Failed to open certificate file: %s", params->file_path);
+        int fd = open(params->file_path, O_RDONLY);
+        if (fd < 0) {
+            ESP_LOGE(TAG, "Failed to open certificate file: %s (errno: %d)", params->file_path, errno);
             return BNCERT_RESULT_FILE_ERROR;
         }
 
-        // Get file size
-        fseek(file, 0, SEEK_END);
-        long file_size = ftell(file);
-        fseek(file, 0, SEEK_SET);
+        // Get file size using fstat
+        struct stat file_stat;
+        if (fstat(fd, &file_stat) != 0) {
+            ESP_LOGE(TAG, "Failed to get file stats: %s (errno: %d)", params->file_path, errno);
+            close(fd);
+            return BNCERT_RESULT_FILE_ERROR;
+        }
 
+        long file_size = file_stat.st_size;
         if (file_size <= 0 || file_size > BNCERT_MAX_DATA_SIZE) {
             ESP_LOGE(TAG, "Invalid certificate file size: %ld bytes", file_size);
-            fclose(file);
+            close(fd);
             return BNCERT_RESULT_FILE_ERROR;
         }
 
@@ -296,17 +302,17 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
         if (!data_buffer) {
             ESP_LOGE(TAG, "Failed to allocate %u bytes for certificate data", 
                      (unsigned int)data_size);
-            fclose(file);
+            close(fd);
             return BNCERT_RESULT_MEMORY_ERROR;
         }
 
-        // Read file data
-        size_t bytes_read = fread(data_buffer, 1, data_size, file);
-        fclose(file);
+        // Read file data using POSIX read
+        ssize_t bytes_read = read(fd, data_buffer, data_size);
+        close(fd);
 
-        if (bytes_read != data_size) {
-            ESP_LOGE(TAG, "Failed to read complete certificate file: %u/%u bytes", 
-                     (unsigned int)bytes_read, (unsigned int)data_size);
+        if (bytes_read != (ssize_t)data_size) {
+            ESP_LOGE(TAG, "Failed to read complete certificate file: %d/%u bytes (errno: %d)", 
+                     (int)bytes_read, (unsigned int)data_size, errno);
             free(data_buffer);
             return BNCERT_RESULT_FILE_ERROR;
         }

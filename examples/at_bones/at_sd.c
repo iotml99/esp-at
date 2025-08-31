@@ -19,6 +19,7 @@
 #include "ff.h"  // FATFS functions
 
 // Pin assignments for SD card (based on ESP-IDF example)
+
 #define PIN_NUM_CS    20
 #define PIN_NUM_MOSI  21
 #define PIN_NUM_CLK   17
