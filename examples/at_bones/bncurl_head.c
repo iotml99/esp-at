@@ -156,7 +156,12 @@ bool bncurl_execute_head_request(bncurl_context_t *ctx)
     curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // HEAD request
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, head_collector_callback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &collector);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    
+    // Configure server response timeout (no data for 30 seconds = abort)
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/sec minimum speed
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 150L); // Safety net (5x response timeout)
+    
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "ESP32-BN-Module/1.0");
     

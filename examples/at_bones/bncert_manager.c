@@ -115,8 +115,8 @@ bool bncert_manager_unregister(uint32_t address)
         if (s_cert_registry.certificates[i].in_use && 
             s_cert_registry.certificates[i].address == address) {
             
-            ESP_LOGI(TAG, "Unregistering certificate '%s' at 0x%08X",
-                     s_cert_registry.certificates[i].name, (unsigned int)address);
+            ESP_LOGI(TAG, "Unregistering certificate at 0x%08X (%u bytes)",
+                     (unsigned int)address, (unsigned int)s_cert_registry.certificates[i].size);
             
             memset(&s_cert_registry.certificates[i], 0, sizeof(bncert_metadata_t));
             s_cert_registry.count--;
@@ -397,4 +397,48 @@ bool bncert_manager_validate_cert(const uint8_t *data, size_t size)
 
     ESP_LOGW(TAG, "Certificate validation failed - unrecognized format");
     return false;
+}
+
+char* bncert_manager_get_first_certificate(size_t *size_out)
+{
+    if (!size_out) {
+        ESP_LOGE(TAG, "Invalid size_out parameter");
+        return NULL;
+    }
+
+    *size_out = 0;
+
+    if (!s_cert_registry.initialized) {
+        ESP_LOGW(TAG, "Certificate manager not initialized");
+        return NULL;
+    }
+
+    if (s_cert_registry.count == 0) {
+        ESP_LOGD(TAG, "No certificates available");
+        return NULL;
+    }
+
+    // Find the first certificate in the registry
+    for (size_t i = 0; i < BNCERT_MAX_CERTIFICATES; i++) {
+        if (s_cert_registry.certificates[i].in_use) {
+            uint8_t *cert_data = NULL;
+            bool success = bncert_manager_load_cert(
+                s_cert_registry.certificates[i].address,
+                s_cert_registry.certificates[i].size,
+                &cert_data
+            );
+
+            if (success && cert_data) {
+                *size_out = s_cert_registry.certificates[i].size;
+                ESP_LOGI(TAG, "Retrieved first certificate: %u bytes from address 0x%08X", 
+                         (unsigned int)*size_out, (unsigned int)s_cert_registry.certificates[i].address);
+                return (char*)cert_data;
+            } else {
+                ESP_LOGW(TAG, "Failed to load certificate at index %u", (unsigned int)i);
+            }
+        }
+    }
+
+    ESP_LOGW(TAG, "No valid certificates found");
+    return NULL;
 }

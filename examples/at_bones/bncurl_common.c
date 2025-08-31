@@ -518,8 +518,12 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     // Set URL
     curl_easy_setopt(curl, CURLOPT_URL, ctx->params.url);
     
-    // Set timeout
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, ctx->timeout);
+    // Set server response timeout (if no data received for timeout seconds, abort)
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, ctx->timeout);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/sec minimum speed
+    
+    // Keep a reasonable total timeout as safety net (much longer than response timeout)
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, ctx->timeout * 10);
     
     // Set method-specific options
     if (strcmp(method, "GET") == 0) {
@@ -1024,8 +1028,11 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     // Configure as HEAD request
     curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
     
+    // Configure server response timeout for HEAD request
     long timeout = is_https ? 30L : 15L;  // Longer timeout for HTTPS
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, timeout);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/sec minimum speed
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout * 5); // Safety net
     
     // Set header callback to capture Content-Length
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, head_header_callback_for_length);
@@ -1067,6 +1074,15 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     
     // Add custom headers if provided (but skip content-related headers for HEAD)
     struct curl_slist *headers = NULL;
+    
+    // Check if this is a range request and add Range header
+    if (strlen(ctx->params.range) > 0) {
+        char range_header[256];
+        snprintf(range_header, sizeof(range_header), "Range: bytes=%s", ctx->params.range);
+        headers = curl_slist_append(headers, range_header);
+        ESP_LOGI(TAG, "Adding Range header for HEAD request: %s", range_header);
+    }
+    
     if (ctx->params.header_count > 0) {
         for (int i = 0; i < ctx->params.header_count; i++) {
             // Skip content-type and content-length headers for HEAD request
@@ -1075,11 +1091,14 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
                 headers = curl_slist_append(headers, ctx->params.headers[i]);
             }
         }
+    }
+    
+    if (headers) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
     
     // Perform the HEAD request
-    ESP_LOGI(TAG, "Executing HEAD request with %ld second timeout...", timeout);
+    ESP_LOGI(TAG, "Executing HEAD request with %ld second server response timeout...", timeout);
     res = curl_easy_perform(curl);
     
     if (res == CURLE_OK) {

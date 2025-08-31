@@ -527,7 +527,7 @@ static uint8_t at_bnwps_query(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
-static uint8_t at_bnwps_setup(uint8_t *cmd_name)
+static uint8_t at_bnwps_setup(uint8_t para_num)
 {
     int32_t timeout_seconds;
     
@@ -592,12 +592,12 @@ static uint8_t at_bnflash_cert_test(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
-static uint8_t at_bnflash_cert_setup(uint8_t *cmd_name)
+static uint8_t at_bnflash_cert_setup(uint8_t para_num)
 {
     bncert_params_t cert_params;
     
-    // Parse parameters
-    uint8_t parse_result = bncert_parse_params(esp_at_get_para_num(), &cert_params);
+    // Parse parameters - we expect exactly 2 parameters: flash_address and data_source
+    uint8_t parse_result = bncert_parse_params(para_num, &cert_params);
     if (parse_result != ESP_AT_RESULT_CODE_OK) {
         return parse_result;
     }
@@ -705,23 +705,13 @@ static uint8_t at_bnweb_radio_query(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
-static uint8_t at_bnweb_radio_setup(uint8_t *cmd_name)
+static uint8_t at_bnweb_radio_setup(uint8_t para_num)
 {
-    uint8_t *cmd_ptr = cmd_name;
-    uint8_t *data_ptr;
-    char url[512] = {0};
-    int enable = 0;
-    
-    // Skip command name
-    cmd_ptr = (uint8_t *)strchr((char *)cmd_ptr, '=');
-    if (!cmd_ptr) {
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-    cmd_ptr++; // Skip '='
+    uint8_t *url_param = NULL;
+    int32_t enable = 0;
     
     // Parse enable parameter (0 or 1)
-    data_ptr = cmd_ptr;
-    if (!esp_at_get_para_as_digit(data_ptr, &enable)) {
+    if (esp_at_get_para_as_digit(0, &enable) != ESP_AT_PARA_PARSE_RESULT_OK) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
@@ -733,50 +723,17 @@ static uint8_t at_bnweb_radio_setup(uint8_t *cmd_name)
         return ESP_AT_RESULT_CODE_OK;
     } else if (enable == 1) {
         // Start web radio - need URL parameter
-        cmd_ptr = (uint8_t *)strchr((char *)cmd_ptr, ',');
-        if (!cmd_ptr) {
+        if (esp_at_get_para_as_str(1, &url_param) != ESP_AT_PARA_PARSE_RESULT_OK) {
             return ESP_AT_RESULT_CODE_ERROR;
-        }
-        cmd_ptr++; // Skip ','
-        
-        // Extract URL (remove quotes if present)
-        data_ptr = cmd_ptr;
-        if (*data_ptr == '"') {
-            data_ptr++; // Skip opening quote
-            char *end_quote = strchr((char *)data_ptr, '"');
-            if (end_quote) {
-                size_t url_len = end_quote - (char *)data_ptr;
-                if (url_len >= sizeof(url)) {
-                    return ESP_AT_RESULT_CODE_ERROR;
-                }
-                strncpy(url, (char *)data_ptr, url_len);
-                url[url_len] = '\0';
-            } else {
-                return ESP_AT_RESULT_CODE_ERROR;
-            }
-        } else {
-            // URL without quotes
-            size_t url_len = strlen((char *)data_ptr);
-            if (url_len >= sizeof(url)) {
-                return ESP_AT_RESULT_CODE_ERROR;
-            }
-            strcpy(url, (char *)data_ptr);
-            
-            // Remove trailing whitespace/CRLF
-            char *end = url + strlen(url) - 1;
-            while (end > url && (*end == '\r' || *end == '\n' || *end == ' ')) {
-                *end = '\0';
-                end--;
-            }
         }
         
         // Validate URL
-        if (strlen(url) == 0) {
+        if (!url_param || strlen((char *)url_param) == 0) {
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
         // Start web radio streaming
-        if (!bnwebradio_start(url)) {
+        if (!bnwebradio_start((char *)url_param)) {
             return ESP_AT_RESULT_CODE_ERROR;
         }
         

@@ -60,19 +60,16 @@ void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_c
                 long current_size = ftell(stream_ctx->output_file);
                 ESP_LOGI(TAG, "Range download: existing file size = %ld bytes", current_size);
                 
-                // Send info to UART for host awareness
-                char size_info[64];
-                snprintf(size_info, sizeof(size_info), "+RANGE_INFO:existing_size=%ld\r\n", current_size);
-                esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
+                // For file range downloads, only send info if appending to existing file
+                if (current_size > 0) {
+                    char size_info[64];
+                    snprintf(size_info, sizeof(size_info), "+RANGE_INFO:existing_size=%ld\r\n", current_size);
+                    esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
+                }
             }
         }
-    } else if (is_range_request) {
-        // Range request streaming to UART - send range info  
-        ESP_LOGI(TAG, "Range request will stream to UART");
-        char size_info[64];
-        snprintf(size_info, sizeof(size_info), "+RANGE_INFO:uart_stream=true\r\n");
-        esp_at_port_write_data((uint8_t *)size_info, strlen(size_info));
-    }
+    } 
+    // Note: Removed UART range info message as it's not needed
     
     
     // Initialize buffers
@@ -168,20 +165,19 @@ void bncurl_stream_finalize(bncurl_stream_context_t *stream_ctx, bool success)
             ESP_LOGI(TAG, "  Bytes written this request: %u", (unsigned int)stream_ctx->bytes_streamed);
             ESP_LOGI(TAG, "  Total file size now: %ld bytes", final_size);
             
-            // Send final size info to UART
-            char final_info[64];
-            snprintf(final_info, sizeof(final_info), "+RANGE_FINAL:file_size=%ld\r\n", final_size);
-            esp_at_port_write_data((uint8_t *)final_info, strlen(final_info));
+            // Send final size info to UART only for range requests
+            if (stream_ctx->is_range_request) {
+                char final_info[64];
+                snprintf(final_info, sizeof(final_info), "+RANGE_FINAL:file_size=%ld\r\n", final_size);
+                esp_at_port_write_data((uint8_t *)final_info, strlen(final_info));
+            }
         } else {
             ESP_LOGE(TAG, "File download failed: %s (%u bytes written)", 
                      stream_ctx->file_path, (unsigned int)stream_ctx->bytes_streamed);
         }
     } else if (stream_ctx->is_range_request && success) {
-        // Range request streaming to UART - send completion info
+        // Range request streaming to UART - completion is indicated by SEND OK, no need for extra message
         ESP_LOGI(TAG, "Range download to UART completed: %u bytes streamed", (unsigned int)stream_ctx->bytes_streamed);
-        char final_info[64];
-        snprintf(final_info, sizeof(final_info), "+RANGE_FINAL:uart_bytes=%u\r\n", (unsigned int)stream_ctx->bytes_streamed);
-        esp_at_port_write_data((uint8_t *)final_info, strlen(final_info));
     }
     
     // Send completion message (always to UART for status)

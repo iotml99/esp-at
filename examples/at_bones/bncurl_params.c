@@ -71,6 +71,22 @@ static bool is_valid_url(const char *url)
             strncmp(url, "https://", 8) == 0);
 }
 
+// Function to validate that file path starts with @ prefix for SD card
+static bool validate_file_path_prefix(const char *file_path, const char *param_name)
+{
+    if (!file_path || strlen(file_path) == 0) {
+        return true; // No file path specified, nothing to validate
+    }
+    
+    if (file_path[0] != '@') {
+        ESP_LOGE(TAG, "Invalid file path for %s: %s (must start with @)", param_name, file_path);
+        printf("ERROR: File path for %s must start with @ (SD card prefix): %s\n", param_name, file_path);
+        return false;
+    }
+    
+    return true;
+}
+
 // Function to validate file exists for reading (cookie send files)
 static bool validate_file_exists_for_reading(const char *file_path)
 {
@@ -218,7 +234,7 @@ static bool validate_and_prepare_sd_file_operations(const bncurl_params_t *param
 }
 
 // Function to normalize path by replacing @ prefix with mount point
-static void normalize_path_with_mount_point(char *path, size_t max_length)
+void normalize_path_with_mount_point(char *path, size_t max_length)
 {
     if (!path || strlen(path) == 0) {
         return;
@@ -421,10 +437,16 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
                         printf("INFO: Will collect %u bytes from UART after OK\n", (unsigned int)params->upload_bytes_expected);
                     }
                 } else {
-                    printf("ERROR: Invalid numeric value for -du: %s (must be 0-65536)\n", upload_str);
+                    // Not a valid number and doesn't start with @ - invalid
+                    printf("ERROR: Invalid -du value: %s (must be numeric 0-65536 or file path starting with @)\n", upload_str);
                     return ESP_AT_RESULT_CODE_ERROR;
                 }
             } else {
+                // File path - validate @ prefix (already has it, but validate anyway for consistency)
+                if (!validate_file_path_prefix(upload_str, "-du")) {
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+                
                 // File path - normalize it
                 params->is_numeric_upload = false;
                 normalize_path_with_mount_point(params->data_upload, BNCURL_MAX_PARAMETER_LENGTH);
@@ -449,6 +471,11 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             
             char *path_str = (char *)param_str;
             
+            // Validate that file path starts with @ prefix
+            if (!validate_file_path_prefix(path_str, "-dd")) {
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
             // Copy data download path with length validation
             if (strlen(path_str) > BNCURL_MAX_FILE_PATH_LENGTH) {
                 printf("ERROR: File path too long. Max length: %d\n", BNCURL_MAX_FILE_PATH_LENGTH);
@@ -457,7 +484,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             strncpy(params->data_download, path_str, BNCURL_MAX_FILE_PATH_LENGTH);
             params->data_download[BNCURL_MAX_FILE_PATH_LENGTH] = '\0';
             
-            // Normalize path if it starts with @ prefix
+            // Normalize path (remove @ and prepend mount point)
             normalize_path_with_mount_point(params->data_download, BNCURL_MAX_FILE_PATH_LENGTH);
             
         } else if (strcmp(option, "-c") == 0) {
@@ -477,6 +504,11 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
+            // Validate that cookie save path starts with @ prefix
+            if (!validate_file_path_prefix((char *)param_str, "-c")) {
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
             // Copy cookie save path with length validation
             if (strlen((char *)param_str) > BNCURL_MAX_COOKIE_FILE_PATH) {
                 printf("ERROR: Cookie file path too long. Max length: %d\n", BNCURL_MAX_COOKIE_FILE_PATH);
@@ -485,7 +517,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             strncpy(params->cookie_save, (char *)param_str, BNCURL_MAX_COOKIE_FILE_PATH);
             params->cookie_save[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
-            // Normalize path if it starts with @ prefix
+            // Normalize path (remove @ and prepend mount point)
             normalize_path_with_mount_point(params->cookie_save, BNCURL_MAX_COOKIE_FILE_PATH);
             
         } else if (strcmp(option, "-b") == 0) {
@@ -505,6 +537,11 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
                 return ESP_AT_RESULT_CODE_ERROR;
             }
             
+            // Validate that cookie send path starts with @ prefix
+            if (!validate_file_path_prefix((char *)param_str, "-b")) {
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
             // Copy cookie send path with length validation
             if (strlen((char *)param_str) > BNCURL_MAX_COOKIE_FILE_PATH) {
                 printf("ERROR: Cookie file path too long. Max length: %d\n", BNCURL_MAX_COOKIE_FILE_PATH);
@@ -513,7 +550,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             strncpy(params->cookie_send, (char *)param_str, BNCURL_MAX_COOKIE_FILE_PATH);
             params->cookie_send[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
-            // Normalize path if it starts with @ prefix
+            // Normalize path (remove @ and prepend mount point)
             normalize_path_with_mount_point(params->cookie_send, BNCURL_MAX_COOKIE_FILE_PATH);
             
         } else if (strcmp(option, "-r") == 0) {

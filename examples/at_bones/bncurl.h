@@ -34,7 +34,20 @@ typedef struct bncurl_response {
 
 bool bncurl_init(bncurl_context_t *ctx);
 
+/**
+ * @brief Get current server response timeout value
+ * @param ctx BNCURL context
+ * @return Timeout in seconds (server inactivity timeout)
+ */
 uint32_t bncurl_get_timeout(bncurl_context_t *ctx);
+
+/**
+ * @brief Set server response timeout
+ * @param ctx BNCURL context  
+ * @param timeout Server response timeout in seconds (1-120)
+ *                If no data received from server for this duration, connection is closed
+ * @return true on success, false on error
+ */
 bool bncurl_set_timeout(bncurl_context_t *ctx, uint32_t timeout);
 
 bool bncurl_stop(bncurl_context_t *ctx);

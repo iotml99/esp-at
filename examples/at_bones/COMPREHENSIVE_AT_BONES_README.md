@@ -179,14 +179,14 @@ OK
 SEND OK
 ```
 
-### AT+BNCURL_TIMEOUT - Timeout Configuration
+### AT+BNCURL_TIMEOUT - Server Response Timeout Configuration
 
-Controls the global timeout for HTTP operations.
+Controls the server response timeout for HTTP operations. This is **NOT** a total download timeout, but a server inactivity timeout. If no data is received from the server for the specified duration, the connection will be closed and an error returned.
 
 #### Command Syntax
 
 ```
-AT+BNCURL_TIMEOUT=<timeout>  # Set timeout
+AT+BNCURL_TIMEOUT=<timeout>  # Set server response timeout
 AT+BNCURL_TIMEOUT?           # Query current timeout
 AT+BNCURL_TIMEOUT=?          # Test command
 ```
@@ -195,7 +195,13 @@ AT+BNCURL_TIMEOUT=?          # Test command
 
 | Parameter | Type | Range | Default | Description |
 |-----------|------|-------|---------|-------------|
-| `timeout` | Integer | 1-300 | 30 | Timeout in seconds |
+| `timeout` | Integer | 1-120 | 30 | Server response timeout in seconds |
+
+#### Behavior
+
+- **Server Response Timeout**: If no data is received from server for `timeout` seconds, abort
+- **Total Operation Timeout**: Set to `timeout × 10` as safety net for very large downloads
+- **Connection Timeout**: Separate 30-second timeout for initial connection establishment
 
 #### Examples
 
@@ -258,6 +264,31 @@ HTTPS requests automatically integrate with the certificate management system:
 1. **Partition Certificates** - Custom certificates override defaults
 2. **Hardcoded CA Bundle** - Embedded certificate bundle for common sites
 3. **Permissive Mode** - Fallback for maximum compatibility
+
+### File Path Requirements
+
+**IMPORTANT:** All file paths in AT Bones commands **MUST** start with the `@` prefix to indicate SD card storage. File paths not starting with `@` will be rejected with an immediate error.
+
+#### Valid File Path Examples
+```
+@/documents/file.txt         # Valid - starts with @
+@/logs/access.log           # Valid - starts with @
+@/certificates/ca.crt       # Valid - starts with @
+```
+
+#### Invalid File Path Examples  
+```
+/documents/file.txt         # INVALID - missing @ prefix
+C:\files\data.txt          # INVALID - missing @ prefix  
+documents/file.txt         # INVALID - missing @ prefix
+```
+
+#### Supported File Operations
+- **`-dd @/path/file.ext`** - Download to SD card file
+- **`-du @/path/file.ext`** - Upload from SD card file  
+- **`-c @/path/cookies.txt`** - Save cookies to SD card file
+- **`-b @/path/cookies.txt`** - Load cookies from SD card file
+- **`AT+BNCERT=0x123456,@/path/cert.pem`** - Flash certificate from SD card file
 
 ### Cookie Support
 

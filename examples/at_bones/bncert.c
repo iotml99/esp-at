@@ -5,6 +5,7 @@
  */
 
 #include "bncert.h"
+#include "bncurl_params.h"
 #include "esp_flash.h"
 #include "esp_partition.h"
 #include "esp_log.h"
@@ -19,6 +20,23 @@
 #include <unistd.h>
 
 static const char *TAG = "BNCERT";
+
+// Function to validate that file path starts with @ prefix for SD card
+static bool validate_cert_file_path_prefix(const char *file_path)
+{
+    if (!file_path || strlen(file_path) == 0) {
+        printf("ERROR: Empty file path for certificate\n");
+        return false;
+    }
+    
+    if (file_path[0] != '@') {
+        ESP_LOGE(TAG, "Invalid certificate file path: %s (must start with @)", file_path);
+        printf("ERROR: Certificate file path must start with @ (SD card prefix): %s\n", file_path);
+        return false;
+    }
+    
+    return true;
+}
 
 // Certificate subsystem state
 static bool s_bncert_initialized = false;
@@ -84,41 +102,46 @@ uint8_t bncert_parse_params(uint8_t para_num, bncert_params_t *params)
     params->flash_address = (uint32_t)addr_value;
 
     // Parse data source (parameter 1)
-    char *data_source_str = NULL;
+    uint8_t *data_source_str = NULL;
     if (esp_at_get_para_as_str(1, &data_source_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
         printf("ERROR: Invalid data source parameter\n");
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
     if (data_source_str[0] == '@') {
-        // File source
+        // File source - validate the @ prefix
+        if (!validate_cert_file_path_prefix((char *)data_source_str)) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
         params->source_type = BNCERT_SOURCE_FILE;
         
-        if (strlen(data_source_str) > BNCERT_MAX_FILE_PATH_LENGTH) {
+        if (strlen((char *)data_source_str) > BNCERT_MAX_FILE_PATH_LENGTH) {
             printf("ERROR: File path too long (max %d characters)\n", BNCERT_MAX_FILE_PATH_LENGTH);
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
-        strncpy(params->file_path, data_source_str, BNCERT_MAX_FILE_PATH_LENGTH);
+        strncpy(params->file_path, (char *)data_source_str, BNCERT_MAX_FILE_PATH_LENGTH);
         params->file_path[BNCERT_MAX_FILE_PATH_LENGTH] = '\0';
         
-        // Normalize the file path
+        // Normalize the file path (remove @ and prepend mount point)
         normalize_path_with_mount_point(params->file_path, BNCERT_MAX_FILE_PATH_LENGTH);
         
         ESP_LOGI(TAG, "Certificate source: file %s", params->file_path);
     } else {
-        // UART data source
-        params->source_type = BNCERT_SOURCE_UART;
-        
+        // Check if it's a valid numeric value for UART data source
         char *endptr;
-        long data_size = strtol(data_source_str, &endptr, 10);
+        long data_size = strtol((char *)data_source_str, &endptr, 10);
         
         if (*endptr != '\0' || data_size < 0 || data_size > BNCERT_MAX_DATA_SIZE) {
-            printf("ERROR: Invalid data size: %s (must be 0-%u)\n", 
-                   data_source_str, BNCERT_MAX_DATA_SIZE);
+            // Not a valid number and doesn't start with @ - invalid
+            printf("ERROR: Invalid data source: %s (must be numeric 0-%u or file path starting with @)\n", 
+                   (char *)data_source_str, BNCERT_MAX_DATA_SIZE);
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
+        // Valid UART data source
+        params->source_type = BNCERT_SOURCE_UART;
         params->data_size = (size_t)data_size;
         ESP_LOGI(TAG, "Certificate source: UART (%u bytes)", (unsigned int)params->data_size);
     }

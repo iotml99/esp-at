@@ -220,8 +220,8 @@ static void webradio_task(void *pvParameters)
     curl_easy_setopt(curl, CURLOPT_URL, g_webradio_ctx.url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, webradio_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, NULL);
-    curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, webradio_progress_callback);
-    curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, webradio_progress_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     
     // Set user agent
@@ -233,7 +233,11 @@ static void webradio_task(void *pvParameters)
     
     // Set timeouts
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L); // No timeout for streaming
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L); // No total timeout for streaming
+    
+    // Set server response timeout for web radio (if no data for 60 seconds, abort)
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/sec minimum speed
     
     // Configure for audio streaming
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 8192L); // 8KB buffer for audio

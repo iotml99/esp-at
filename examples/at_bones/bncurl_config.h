@@ -105,13 +105,14 @@
 #define BNCURL_MAX_RANGE_END            0xFFFFFFFF
 
 /* ==================== Timeout Configuration ==================== */
-/** Default connection timeout (seconds) - spec default */
+/** Default server response timeout (seconds) - if no data received for this duration, abort
+ *  This is NOT a total download timeout, but a server inactivity timeout */
 #define BNCURL_DEFAULT_TIMEOUT          30
 
-/** Minimum timeout value (seconds) - spec minimum */
+/** Minimum server response timeout value (seconds) - spec minimum */
 #define BNCURL_MIN_TIMEOUT              1
 
-/** Maximum timeout value (seconds) - spec maximum */
+/** Maximum server response timeout value (seconds) - spec maximum */
 #define BNCURL_MAX_TIMEOUT              120
 
 /** DNS resolution timeout (seconds) */
