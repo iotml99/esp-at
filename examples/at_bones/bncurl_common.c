@@ -7,6 +7,7 @@
 #include "bncurl_common.h"
 #include "bncurl_methods.h"
 #include "bncurl_config.h"
+#include "bncurl_cookies.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -19,6 +20,49 @@
 #include "freertos/task.h"
 
 static const char *TAG = "BNCURL_COMMON";
+
+// Combined header callback that handles both content-length and cookies
+size_t bncurl_combined_header_callback(char *buffer, size_t size, size_t nitems, void *userdata)
+{
+    bncurl_common_context_t *common_ctx = (bncurl_common_context_t *)userdata;
+    size_t total_size = size * nitems;
+    
+    // First handle regular header processing (content-length, HEAD streaming, etc.)
+    size_t result = bncurl_common_header_callback(buffer, size, nitems, userdata);
+    
+    // Then handle cookie processing if cookie context is available
+    if (common_ctx && common_ctx->cookies) {
+        // Look for Set-Cookie headers
+        if (strncasecmp(buffer, "Set-Cookie:", 11) == 0) {
+            char *cookie_start = buffer + 11;
+            while (*cookie_start == ' ' || *cookie_start == '\t') cookie_start++; // Skip whitespace
+            
+            // Create null-terminated cookie string
+            char cookie_string[512];
+            size_t cookie_len = total_size - (cookie_start - buffer);
+            if (cookie_len > sizeof(cookie_string) - 1) {
+                cookie_len = sizeof(cookie_string) - 1;
+            }
+            
+            memcpy(cookie_string, cookie_start, cookie_len);
+            cookie_string[cookie_len] = '\0';
+            
+            // Remove trailing CRLF
+            char *end = cookie_string + strlen(cookie_string) - 1;
+            while (end >= cookie_string && (*end == '\r' || *end == '\n')) {
+                *end = '\0';
+                end--;
+            }
+            
+            if (strlen(cookie_string) > 0) {
+                ESP_LOGI(TAG, "Received Set-Cookie: %s", cookie_string);
+                bncurl_cookies_parse_and_add(common_ctx->cookies, cookie_string);
+            }
+        }
+    }
+    
+    return result;
+}
 
 /* Hardcoded CA bundle for HTTPS support */
 static const char CA_BUNDLE_PEM[] =
@@ -418,10 +462,20 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     bool success = false;
     char *post_data = NULL;  // Track allocated POST data for cleanup
     
+    // Initialize cookie context
+    bncurl_cookie_context_t cookie_ctx;
+    bool has_cookie_save = (strlen(ctx->params.cookie_save) > 0);
+    bool has_cookie_send = (strlen(ctx->params.cookie_send) > 0);
+    
+    if (has_cookie_save) {
+        bncurl_cookies_init_context(&cookie_ctx, ctx->params.cookie_save);
+    }
+    
     // Initialize common context
     bncurl_common_context_t common_ctx;
     common_ctx.ctx = ctx;
     common_ctx.stream = stream;
+    common_ctx.cookies = has_cookie_save ? &cookie_ctx : NULL;
     
     // Initialize curl
     curl = curl_easy_init();
@@ -546,14 +600,28 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         ESP_LOGI(TAG, "HEAD: Request configured (headers only)");
     }
     
+    // Configure cookie loading if -b parameter is provided
+    if (has_cookie_send) {
+        if (!bncurl_cookies_load_from_file(curl, ctx->params.cookie_send)) {
+            ESP_LOGW(TAG, "Failed to load cookies from file: %s", ctx->params.cookie_send);
+        }
+    }
+    
+    // Configure cookie saving if -c parameter is provided
+    if (has_cookie_save) {
+        if (!bncurl_cookies_configure_saving(curl, ctx->params.cookie_save, &cookie_ctx)) {
+            ESP_LOGW(TAG, "Failed to configure cookie saving to: %s", ctx->params.cookie_save);
+        }
+    }
+    
     // Set callbacks for data receiving (not for HEAD requests)
     if (strcmp(method, "HEAD") != 0) {
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, bncurl_common_write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &common_ctx);
     }
     
-    // Set header callback
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, bncurl_common_header_callback);
+    // Set header callback (handles both content-length detection and cookie capturing)
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, bncurl_combined_header_callback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &common_ctx);
     
     // Set progress callback
@@ -582,30 +650,32 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
     curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
     
-    // Configure HTTPS/TLS settings with hardcoded CA certificates
-    struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
-    CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca);
-    
-    // If CA blob fails, try alternative approaches
-    if (ca_result != CURLE_OK) {
-        ESP_LOGW(TAG, "CA blob failed, trying alternative SSL configuration");
-        // Use ESP32's built-in certificate bundle if available
-        curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
-        curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
+    // Configure HTTPS/TLS settings with multiple fallback strategies
+    if (strncmp(ctx->params.url, "https://", 8) == 0) {
+        ESP_LOGI(TAG, "HTTPS detected - configuring SSL with fallback strategies");
+        
+        // Strategy 1: Try hardcoded CA bundle first
+        struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
+        CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca);
+        
+        if (ca_result == CURLE_OK) {
+            ESP_LOGI(TAG, "Using embedded CA bundle for SSL verification");
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        } else {
+            ESP_LOGW(TAG, "Embedded CA bundle failed, using permissive SSL settings");
+            // Strategy 2: Use permissive settings for broader compatibility
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable peer verification
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
+            curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
+        }
+        
+        // Common SSL settings for better compatibility
+        curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
+        curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_DEFAULT);
+        
+        ESP_LOGI(TAG, "SSL configuration complete - attempting HTTPS connection");
     }
-    
-    // Try more permissive SSL settings for broader compatibility
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-    
-    // Add fallback: if certificate verification fails, try with less strict verification
-    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
-    
-    // Enable verbose SSL debug for troubleshooting
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-    
-    // Set SSL version to be more permissive
-    curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_DEFAULT);
     
     // Add custom headers if provided
     struct curl_slist *headers = NULL;
@@ -649,13 +719,18 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
             ESP_LOGE(TAG, "Operation timed out - check network stability");
         } else if (res == CURLE_SSL_CONNECT_ERROR) {
             ESP_LOGE(TAG, "SSL connection failed - certificate or TLS handshake issue");
-            ESP_LOGE(TAG, "Try HTTP instead of HTTPS for testing: http://httpbin.org/json");
+            ESP_LOGE(TAG, "This may be due to certificate authority not being in embedded bundle");
+            ESP_LOGE(TAG, "For testing, try an HTTP endpoint instead: http://httpbin.org/json");
+            ESP_LOGE(TAG, "Or check if the service supports a different certificate authority");
         } else if (res == CURLE_PEER_FAILED_VERIFICATION) {
-            ESP_LOGE(TAG, "SSL certificate verification failed");
-            ESP_LOGE(TAG, "Certificate may be expired or not trusted by CA bundle");
-            ESP_LOGE(TAG, "If error is BADCERT_FUTURE, check system time with AT+CIPSNTPTIME?");
+            ESP_LOGE(TAG, "SSL certificate verification failed - certificate not trusted");
+            ESP_LOGE(TAG, "Certificate authority may not be in embedded CA bundle");
+            ESP_LOGE(TAG, "For api.openweathermap.org, this is a known limitation");
+            ESP_LOGE(TAG, "Consider using HTTP endpoints when available for testing");
         } else if (res == CURLE_SSL_CACERT) {
-            ESP_LOGE(TAG, "SSL CA certificate problem - CA bundle may be incomplete");
+            ESP_LOGE(TAG, "SSL CA certificate problem - certificate authority not recognized");
+            ESP_LOGE(TAG, "The embedded CA bundle may not include this service's certificate authority");
+            ESP_LOGE(TAG, "This is common with some API services like OpenWeatherMap");
         } else {
             ESP_LOGE(TAG, "Curl error: %s (code: %d)", curl_easy_strerror(res), res);
         }
@@ -667,6 +742,11 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     }
     if (post_data) {
         free(post_data);
+    }
+    
+    // Clean up cookies if saving was enabled
+    if (has_cookie_save) {
+        bncurl_cookies_cleanup_context(&cookie_ctx);
     }
     
     // Cleanup parameters (especially collected data)
@@ -834,17 +914,17 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
     curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
     
-    // Configure HTTPS/TLS settings with more relaxed timeouts
+    // Configure HTTPS/TLS settings with more permissive approach for HEAD requests
     if (is_https) {
-        // For HEAD requests, we can be more lenient with SSL verification
+        // For HEAD requests, use permissive SSL settings for broader compatibility
         // since we're only getting headers, not sensitive content
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable peer verification for HEAD
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification for HEAD
         curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
         curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_DEFAULT);
+        curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
         
-        // Enable verbose SSL logging for debugging
-        ESP_LOGI(TAG, "HEAD request using HTTPS with relaxed SSL verification");
+        ESP_LOGI(TAG, "HEAD request using permissive HTTPS configuration for compatibility");
     }
     
     // Add custom headers if provided (but skip content-related headers for HEAD)

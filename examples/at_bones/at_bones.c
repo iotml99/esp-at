@@ -129,8 +129,28 @@ static bool collect_uart_data(size_t expected_bytes, char **collected_data, size
 
 static uint8_t at_test_cmd_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "test command: <AT%s=?> is executed\r\n", cmd_name);
+    uint8_t buffer[512] = {0};
+    snprintf((char *)buffer, 512, 
+        "AT+BNCURL=<method>,<url>[,<options>]\r\n"
+        "HTTP/HTTPS client with libcurl support\r\n"
+        "\r\n"
+        "Methods: GET, POST, HEAD\r\n"
+        "Options:\r\n"
+        "  -H \"Header: Value\"  Custom HTTP header\r\n"
+        "  -du <bytes|@file>   Upload data (POST only)\r\n"
+        "  -dd <@file>         Download to file\r\n"
+        "  -c <@file>          Save cookies to file\r\n"
+        "  -b <@file>          Send cookies from file\r\n"
+        "  -r <start-end>      Range request (GET only)\r\n"
+        "  -v                  Verbose debug output\r\n"
+        "\r\n"
+        "Cookie Usage:\r\n"
+        "  -c \"@cookies.txt\"   Save cookies to file & stream to UART\r\n"
+        "  -b \"@cookies.txt\"   Load cookies from file for request\r\n"
+        "\r\n"
+        "Examples:\r\n"
+        "  AT+BNCURL=\"GET\",\"https://httpbin.org/cookies\",\"-b\",\"@cookies.txt\"\r\n"
+        "  AT+BNCURL=\"POST\",\"https://httpbin.org/cookies/set/test/value\",\"-c\",\"@cookies.txt\"\r\n");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
 
     return ESP_AT_RESULT_CODE_OK;

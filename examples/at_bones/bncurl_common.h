@@ -12,11 +12,13 @@
 #include <curl/curl.h>
 #include "bncurl.h"
 #include "bncurl_methods.h"
+#include "bncurl_cookies.h"
 
 // Common context structure for shared curl operations
 typedef struct {
     bncurl_context_t *ctx;              // Main BNCURL context
     bncurl_stream_context_t *stream;    // Streaming context
+    bncurl_cookie_context_t *cookies;   // Cookie context for handling cookies
 } bncurl_common_context_t;
 
 /**
@@ -40,6 +42,17 @@ size_t bncurl_common_write_callback(void *contents, size_t size, size_t nmemb, v
  * @return Number of bytes processed
  */
 size_t bncurl_common_header_callback(char *buffer, size_t size, size_t nitems, void *userdata);
+
+/**
+ * @brief Combined header callback for curl (handles both content-length and cookies)
+ * 
+ * @param buffer Header data
+ * @param size Size of each element
+ * @param nitems Number of elements
+ * @param userdata Pointer to bncurl_common_context_t
+ * @return Number of bytes processed
+ */
+size_t bncurl_combined_header_callback(char *buffer, size_t size, size_t nitems, void *userdata);
 
 /**
  * @brief Common progress callback for curl
