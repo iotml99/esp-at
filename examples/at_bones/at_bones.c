@@ -15,6 +15,7 @@
 #include "bncurl_executor.h"
 #include "at_sd.h"
 #include "util.h"
+#include "bnwps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -484,6 +485,84 @@ static uint8_t at_bnsd_format_exe(uint8_t *cmd_name)
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
+// WPS Command Handlers
+static uint8_t at_bnwps_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[512] = {0};
+    snprintf((char *)buffer, 512,
+        "+BNWPS:<t>\r\n"
+        "Set WPS timeout in seconds (1-300, 0=cancel)\r\n"
+        "\r\n"
+        "AT+BNWPS?\r\n"
+        "Query WPS status\r\n"
+        "\r\n"
+        "Examples:\r\n"
+        "  AT+BNWPS=60      Start WPS for 60 seconds\r\n"
+        "  AT+BNWPS=0       Cancel WPS operation\r\n"
+        "  AT+BNWPS?        Check current WPS status\r\n"
+        "\r\n"
+        "Response on success:\r\n"
+        "  +CWJAP:\"<ssid>\",\"<bssid>\",<channel>,<rssi>,<pci_en>,<reconn_interval>,<listen_interval>,<scan_mode>,<pmf>\r\n"
+        "  OK\r\n"
+        "\r\n"
+        "Response on error:\r\n"
+        "  +CWJAP:<error_code>\r\n"
+        "  ERROR\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwps_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[64] = {0};
+    
+    bnwps_status_t status = bnwps_get_status();
+    int status_value = (status == BNWPS_STATUS_ACTIVE) ? 1 : 0;
+    
+    snprintf((char *)buffer, 64, "+BNWPS:%d\r\n", status_value);
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnwps_setup(uint8_t *cmd_name)
+{
+    int32_t timeout_seconds;
+    
+    // Parse the timeout parameter
+    if (esp_at_get_para_as_digit(0, &timeout_seconds) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        printf("ERROR: Invalid timeout parameter\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Validate range
+    if (timeout_seconds < 0 || timeout_seconds > BNWPS_MAX_TIMEOUT_SECONDS) {
+        printf("ERROR: Timeout must be 0-%u seconds\n", BNWPS_MAX_TIMEOUT_SECONDS);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Initialize WPS if not already done
+    if (!bnwps_init()) {
+        printf("ERROR: Failed to initialize WPS\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Start or cancel WPS operation
+    bool success = bnwps_start((uint16_t)timeout_seconds);
+    if (!success) {
+        printf("ERROR: Failed to start WPS operation\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // For cancel operation (timeout_seconds = 0), send immediate response
+    if (timeout_seconds == 0) {
+        uint8_t buffer[32] = {0};
+        snprintf((char *)buffer, 32, "+BNWPS:0\r\n");
+        esp_at_port_write_data(buffer, strlen((char *)buffer));
+    }
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
@@ -493,6 +572,7 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNSD_UNMOUNT", at_bnsd_unmount_test, at_bnsd_unmount_query, NULL, at_bnsd_unmount_exe},
     {"+BNSD_SPACE", at_bnsd_space_test, at_bnsd_space_query, NULL, NULL},
     {"+BNSD_FORMAT", at_bnsd_format_test, at_bnsd_format_query, NULL, at_bnsd_format_exe},
+    {"+BNWPS", at_bnwps_test, at_bnwps_query, at_bnwps_setup, NULL},
 };
 
 bool esp_at_custom_cmd_register(void)
@@ -519,6 +599,13 @@ bool esp_at_custom_cmd_register(void)
         bncurl_executor_deinit();
         return false;
     }
+    
+    // Initialize WPS subsystem
+    if (!bnwps_init()) {
+        // WPS initialization failure is not fatal, log warning and continue
+        ESP_LOGW("AT_BONES", "Failed to initialize WPS subsystem");
+    }
+    
     return esp_at_custom_cmd_array_regist(at_custom_cmd, sizeof(at_custom_cmd) / sizeof(esp_at_cmd_struct));
 }
 
