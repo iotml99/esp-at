@@ -34,11 +34,11 @@ bool bncurl_execute_get_request(bncurl_context_t *ctx)
     char len_marker[64];
     if (expected_content_length == SIZE_MAX) {
         // HEAD failed or no content length available
-        snprintf(len_marker, sizeof(len_marker), "+LEN:-1\r\n");
+        snprintf(len_marker, sizeof(len_marker), "+LEN:-1,\r\n");
         ESP_LOGI(TAG, "Content length unknown, sending +LEN:-1");
     } else {
         // HEAD succeeded and we have content length (including 0)
-        snprintf(len_marker, sizeof(len_marker), "+LEN:%u\r\n", (unsigned int)expected_content_length);
+        snprintf(len_marker, sizeof(len_marker), "+LEN:%u,\r\n", (unsigned int)expected_content_length);
         ESP_LOGI(TAG, "Content length determined: %u bytes", (unsigned int)expected_content_length);
     }
     esp_at_port_write_data((uint8_t *)len_marker, strlen(len_marker));

@@ -14,6 +14,7 @@
 #include "bncurl_config.h"
 #include "bncurl_executor.h"
 #include "at_sd.h"
+#include "util.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -402,25 +403,34 @@ static uint8_t at_bnsd_space_test(uint8_t *cmd_name)
     uint8_t buffer[128] = {0};
     snprintf((char *)buffer, 128, 
         "AT+BNSD_SPACE?\r\n"
-        "Get SD card space information (total, used, free bytes)\r\n");
+        "Get SD card space information in format: +BNSD_SPACE:total_bytes/used_bytes\r\n"
+        "Note: used_bytes includes filesystem overhead and user data\r\n");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
 
 static uint8_t at_bnsd_space_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[256] = {0};
+    uint8_t buffer[512] = {0};  // Increased buffer size for uint64 strings
     at_sd_info_t info;
     
     if (!at_sd_get_space_info(&info)) {
-        snprintf((char *)buffer, 256, "+BNSD_SPACE:ERROR\r\n");
+        snprintf((char *)buffer, sizeof(buffer), "+BNSD_SPACE:ERROR\r\n");
     } else {
-        // Return values in MB for readability
-        uint32_t total_mb = (uint32_t)(info.total_bytes / (1024 * 1024));
-        uint32_t used_mb = (uint32_t)(info.used_bytes / (1024 * 1024));
-        uint32_t free_mb = (uint32_t)(info.free_bytes / (1024 * 1024));
+        // Convert uint64_t values to strings using util function
+        char total_str[32];
+        char used_str[32];
         
-        snprintf((char *)buffer, 256, "+BNSD_SPACE:%u,%u,%u\r\n", total_mb, used_mb, free_mb);
+        int total_len = uint64_to_string(info.total_bytes, total_str, sizeof(total_str));
+        int used_len = uint64_to_string(info.used_bytes, used_str, sizeof(used_str));
+        
+        if (total_len > 0 && used_len > 0) {
+            // Format: +BNSD_SPACE:total_bytes/used_bytes
+            snprintf((char *)buffer, sizeof(buffer), "+BNSD_SPACE:%s/%s\r\n", total_str, used_str);
+        } else {
+            // Fallback if string conversion fails
+            snprintf((char *)buffer, sizeof(buffer), "+BNSD_SPACE:ERROR\r\n");
+        }
     }
     
     esp_at_port_write_data(buffer, strlen((char *)buffer));
