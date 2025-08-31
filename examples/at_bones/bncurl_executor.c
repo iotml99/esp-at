@@ -64,12 +64,9 @@ static void bncurl_executor_task(void *pvParameters)
                         executor->current_request = NULL;
                         executor->last_result = success;
                         
-                        // Send completion status via UART only if request failed
-                        // Success case is handled by bncurl_execute_get_request() which sends data + SEND OK
-                        if (!success) {
-                            const char *send_error = "\r\nSEND ERROR\r\n";
-                            esp_at_port_write_data((uint8_t *)send_error, strlen(send_error));
-                        }
+                        // Completion status (SEND OK/SEND ERROR) is handled by bncurl_stream_finalize()
+                        // in the respective GET/POST/HEAD implementations, so we don't send it here
+                        // to avoid duplicate messages
                         
                         xSemaphoreGive(executor_mutex);
                     }

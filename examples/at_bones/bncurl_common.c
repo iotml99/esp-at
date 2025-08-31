@@ -11,9 +11,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include <time.h>
 #include "esp_at.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "BNCURL_COMMON";
 
@@ -600,6 +603,154 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     curl_easy_cleanup(curl);
     
     ctx->is_running = false;
+    
+    return success;
+}
+
+// Structure to capture content length from HEAD request
+typedef struct {
+    size_t content_length;
+    bool found;
+} head_response_t;
+
+// Header callback for HEAD request to extract content length
+static size_t head_header_callback_for_length(char *buffer, size_t size, size_t nitems, void *userdata)
+{
+    head_response_t *head_response = (head_response_t *)userdata;
+    size_t total_size = size * nitems;
+    
+    // Look for Content-Length header
+    if (strncasecmp(buffer, "Content-Length:", 15) == 0) {
+        char *length_str = buffer + 15;
+        while (*length_str == ' ' || *length_str == '\t') length_str++; // Skip whitespace
+        
+        head_response->content_length = strtoul(length_str, NULL, 10);
+        head_response->found = true;
+        ESP_LOGI(TAG, "HEAD request detected Content-Length: %u bytes", (unsigned int)head_response->content_length);
+    }
+    
+    return total_size;
+}
+
+bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_length)
+{
+    if (!ctx || !content_length) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        *content_length = SIZE_MAX; // Use SIZE_MAX to indicate -1
+        return false;
+    }
+    
+    CURL *curl;
+    CURLcode res;
+    head_response_t head_response = {0, false};
+    bool success = false;
+    
+    *content_length = SIZE_MAX; // Initialize to SIZE_MAX (will be converted to -1)
+    
+    // Check if this is an HTTPS request
+    bool is_https = (strncmp(ctx->params.url, "https://", 8) == 0);
+    
+    // Initialize curl for HEAD request
+    curl = curl_easy_init();
+    if (!curl) {
+        ESP_LOGE(TAG, "Failed to initialize curl for HEAD request");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Making HEAD request to get content length: %s", ctx->params.url);
+    
+    // Small delay for HTTPS to allow any previous connections to settle
+    if (is_https) {
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay for HTTPS
+    }
+    
+    // Set URL
+    curl_easy_setopt(curl, CURLOPT_URL, ctx->params.url);
+    
+    // Configure as HEAD request
+    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+    
+    long timeout = is_https ? 30L : 15L;  // Longer timeout for HTTPS
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
+    
+    // Set header callback to capture Content-Length
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, head_header_callback_for_length);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &head_response);
+    
+    // Follow redirects
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, BNCURL_MAX_REDIRECTS);
+    
+    // Set User-Agent
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, BNCURL_DEFAULT_USER_AGENT);
+    
+    // Configure DNS and connection settings (longer timeouts for HTTPS)
+    curl_easy_setopt(curl, CURLOPT_DNS_SERVERS, "8.8.8.8,1.1.1.1,208.67.222.222");
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, is_https ? 20L : 10L);
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    
+    // Configure HTTPS/TLS settings with more relaxed timeouts
+    if (is_https) {
+        // For HEAD requests, we can be more lenient with SSL verification
+        // since we're only getting headers, not sensitive content
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable peer verification for HEAD
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification for HEAD
+        curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
+        curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_DEFAULT);
+        
+        // Enable verbose SSL logging for debugging
+        ESP_LOGI(TAG, "HEAD request using HTTPS with relaxed SSL verification");
+    }
+    
+    // Add custom headers if provided (but skip content-related headers for HEAD)
+    struct curl_slist *headers = NULL;
+    if (ctx->params.header_count > 0) {
+        for (int i = 0; i < ctx->params.header_count; i++) {
+            // Skip content-type and content-length headers for HEAD request
+            if (strncasecmp(ctx->params.headers[i], "Content-Type:", 13) != 0 &&
+                strncasecmp(ctx->params.headers[i], "Content-Length:", 15) != 0) {
+                headers = curl_slist_append(headers, ctx->params.headers[i]);
+            }
+        }
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
+    
+    // Perform the HEAD request
+    ESP_LOGI(TAG, "Executing HEAD request with %ld second timeout...", timeout);
+    res = curl_easy_perform(curl);
+    
+    if (res == CURLE_OK) {
+        // Get response code
+        long response_code;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+        
+        ESP_LOGI(TAG, "HEAD request completed with HTTP code: %ld", response_code);
+        
+        if (response_code >= 200 && response_code < 300) {
+            if (head_response.found) {
+                *content_length = head_response.content_length;
+                success = true;
+                ESP_LOGI(TAG, "HEAD request successful, Content-Length: %u bytes", (unsigned int)*content_length);
+            } else {
+                ESP_LOGW(TAG, "HEAD request successful but no Content-Length header found");
+                *content_length = SIZE_MAX; // No content length available = -1
+                success = false;
+            }
+        } else {
+            ESP_LOGW(TAG, "HEAD request failed with HTTP code: %ld", response_code);
+            *content_length = SIZE_MAX; // Failed request = -1
+        }
+    } else {
+        ESP_LOGW(TAG, "HEAD request curl error: %s (code: %d)", curl_easy_strerror(res), res);
+        *content_length = SIZE_MAX; // Curl error = -1
+    }
+    
+    // Cleanup
+    if (headers) {
+        curl_slist_free_all(headers);
+    }
+    curl_easy_cleanup(curl);
     
     return success;
 }

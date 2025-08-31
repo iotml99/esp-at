@@ -65,4 +65,13 @@ int bncurl_common_progress_callback(void *clientp, curl_off_t dltotal, curl_off_
 bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_t *stream, 
                                    const char *method);
 
+/**
+ * @brief Get content length via HEAD request
+ * 
+ * @param ctx BNCURL context
+ * @param content_length Pointer to store the content length
+ * @return true if content length was successfully retrieved, false otherwise
+ */
+bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_length);
+
 #endif /* BNCURL_COMMON_H */
