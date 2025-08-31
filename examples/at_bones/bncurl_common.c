@@ -124,6 +124,74 @@ static const char CA_BUNDLE_PEM[] =
 "MB0GA1UdDgQWBBSlzjfq67B1DpRniLRF+tkkEIeWHzAKBggqhkjOPQQDAgNIADBF"
 "AiEAiZQb1gODuHNyZNkD2G2ByEQjW2p9cLbvv5dAE5wG5CgCIGV+HgAl0xRgJrW8"
 "xP9x+nOgvv4U+2nfAM7S4/J8ydnl\n"
+"-----END CERTIFICATE-----\n"
+/* GeoTrust Global CA - widely used CA for many sites */
+"-----BEGIN CERTIFICATE-----\n"
+"MIIDVDCCAjygAwIBAgIDAjRWMA0GCSqGSIb3DQEBBQUAMEIxCzAJBgNVBAYTAlVT"
+"MRYwFAYDVQQKEw1HZW9UcnVzdCBJbmMuMRswGQYDVQQDExJHZW9UcnVzdCBHbG9i"
+"YWwgQ0EwHhcNMDIwNTIxMDQwMDAwWhcNMjIwNTIxMDQwMDAwWjBCMQswCQYDVQQG"
+"EwJVUzEWMBQGA1UEChMNR2VvVHJ1c3QgSW5jLjEbMBkGA1UEAxMSR2VvVHJ1c3Qg"
+"R2xvYmFsIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2swYYzD9"
+"9BcjGlZ+W988bDjkcbd4kdS8odhM+KhDtgPpTSEHCIjaWC9mOSm9BXiLnTjoBbdq"
+"fnGk5sRgprDvgOSJKA+eJdbtg/OtppHHmMlCGDUUna2YRpIuT8rxh0PBFpVXLVDv"
+"iS2Aelet8u5fa9IAjbkU+BQVNdnARqN7csiRv8lVK83Qlz6cJmTM386DGXHKTubU"
+"1XupGc1V3sjs0l44U+VcT4wt/lAjNvxm5suOpDkZALeVAjmRCw7+OC7RHQWa9k0+"
+"bw8HHa8sHo9gOeL6NlMTOdReJivbPagUvTLrGAMoUgRx5aszPeE4uwc2hGKceeoW"
+"MPRfwCvocWvk+QIDAQABo1MwUTAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTA"
+"ephojYn7qwVkDBF9qn1luMrMTjAfBgNVHSMEGDAWgBTAephojYn7qwVkDBF9qn1l"
+"uMrMTjANBgkqhkiG9w0BAQUFAAOCAQEANeMpauUvXVSOKVCUn5kaFOSPeCpilKIn"
+"Z57QzxpeR+nBsqTP3UEaBU6bS+5Kb1VSsyShNwrrZHYqLizz/Tt1kL/6cdjHPTfS"
+"tQWVYrmm3ok9Nns4d0iXrKYgjy6myQzCsplFAMfOEVEiIuCl6rYVSAlk6l5PdPcF"
+"PseKUgzbFbS9bZvlxrFUaKnjaZC2mqUPuLk/IH2uSrW4nOQdtqvmlKXBx4Ot2/Un"
+"hw4EbNX/3aBd7YdStysVAq45pmp06drE57xNNB6pXE0zX5IJL4hmXXeXxx12E6nV"
+"5fEWCRE11azbJHFwLJhWC9kXtNHjUStedejV0NxPNO3CBWaAocvmMw==\n"
+"-----END CERTIFICATE-----\n"
+/* GlobalSign Root CA - widely used worldwide */
+"-----BEGIN CERTIFICATE-----\n"
+"MIIDdTCCAl2gAwIBAgILBAAAAAABFUtaw5QwDQYJKoZIhvcNAQEFBQAwVzELMAkG"
+"A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExEDAOBgNVBAsTB1Jv"
+"b3QgQ0ExGzAZBgNVBAMTEkdsb2JhbFNpZ24gUm9vdCBDQTAeFw05ODA5MDExMjAw"
+"MDBaFw0yODAxMjgxMjAwMDBaMFcxCzAJBgNVBAYTAkJFMRkwFwYDVQQKExBHbG9i"
+"YWxTaWduIG52LXNhMRAwDgYDVQQLEwdSb290IENBMRswGQYDVQQDExJHbG9iYWxT"
+"aWduIFJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDaDuaZ"
+"jc6j40+Kfvvxi4Mla+pIH/EqsLmVEQS98GPR4mdmzxzdzxtIK+6NiY6arymAZavp"
+"xy0Sy6scTHAHoT0KMM0VjU/43dSMUBUc71DuxC73/OlS8pF94G3VNTCOXkNz8kHp"
+"1Wrjsok6Vjk4bwY8iGlbKk3Fp1S4bInMm/k8yuX9ifUSPJJ4ltbcdG6TRGHRjcdG"
+"snUOhugZitVtbNV4FpWi6cgKOOvyJBNPc1STE4U6G7weNLWLBYy5d4ux2x8gkasJ"
+"U26Qzns3dLlwR5EiUWMWea6xrkEmCMgZK9FGqkjWZCrXgzT/LCrBbBlDSgeF59N8"
+"9iFo7+ryUp9/k5DPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8E"
+"BTADAQH/MB0GA1UdDgQWBBRge2YaRQ2XyolQL30EzTSo//z9SzANBgkqhkiG9w0B"
+"AQUFAAOCAQEA1nPnfE920I2/7LqivjTFKDK1fPxsnCwrvQmeU79rXqoRSLblCKOz"
+"yj1hTdNGCbM+w6DjY1Ub8rrvrTnhQ7k4o+YviiY776BQVvnGCv04zcQLcFGUl5gE"
+"38NflNUVyRRBnMRddWQVDf9VMOyGj/8N7yy5Y0b2qvzfvGn9LhJIZJrglfCm7ymP"
+"AbEVtQwdpf5pLGkkeB6zpxxxYu7KyJesF12KwvhHhm4qxFYxldBniYUr+WymXUad"
+"DKqC5JlR3XC321Y9YeRq4VzW9v493kHMB65jUr9TU/Qr6cf9tveCX4XSQRjbgbME"
+"HMUfpIBvFSDJ3gyICh3WZlXi/EjJKSZp4A==\n"
+"-----END CERTIFICATE-----\n"
+/* Starfield Services Root Certificate Authority - G2 */
+"-----BEGIN CERTIFICATE-----\n"
+"MIID7zCCAtegAwIBAgIBADANBgkqhkiG9w0BAQsFADCBmDELMAkGA1UEBhMCVVMx"
+"EDAOBgNVBAgTB0FyaXpvbmExEzARBgNVBAcTClNjb3R0c2RhbGUxJTAjBgNVBAoT"
+"HFN0YXJmaWVsZCBUZWNobm9sb2dpZXMsIEluYy4xOzA5BgNVBAMTMlN0YXJmaWVs"
+"ZCBTZXJ2aWNlcyBSb290IENlcnRpZmljYXRlIEF1dGhvcml0eSAtIEcyMB4XDTA5"
+"MDkwMTAwMDAwMFoXDTM3MTIzMTIzNTk1OVowgZgxCzAJBgNVBAYTAlVTMRAwDgYD"
+"VQQIEwdBcml6b25hMRMwEQYDVQQHEwpTY290dHNkYWxlMSUwIwYDVQQKExxTdGFy"
+"ZmllbGQgVGVjaG5vbG9naWVzLCBJbmMuMTswOQYDVQQDEzJTdGFyZmllbGQgU2Vy"
+"dmljZXMgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgLSBHMjCCASIwDQYJKoZI"
+"hvcNAQEBBQADggEPADCCAQoCggEBANUMOsQq+U7i9b4Zl1+OiFOxHz/Lz58gE20p"
+"OsgPfTz3a3Y4Y9k2YKibXlwAgLIvWX/2h/klQ4bnaRtSmpDhcePYLQ1Ob/bISdm2"
+"8xpWriu2dBTrz/sm4xq6HZYuajtYlIlHVv8loJNwU4PahHQUw2eeBGg6345AWh1K"
+"Ts9DkTvnVtYAcMtS7nt9rjrnvDH5RfbCYM8TWQIrgMw0R9+53pBlbQLP1rTQ8MPz"
+"GxMDm3KE8OBGPE8JT2BrEcjhZEXJayP9IQSyJo2A8xKOqcaHnm4Ib6c4DJoSjCKy"
+"YKpQ7Y8dJQNJSNJR26sYXa3CTHgpYqYULQCO5LXGE9V8qPxwQBkCAwEAAaNjMGEw"
+"DwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFJxfAN+q"
+"AdcwKziIorhtSpzyEZGDMB8GA1UdIwQYMBaAFJxfAN+qAdcwKziIorhtSpzyEZGD"
+"MA0GCSqGSIb3DQEBCwUAA4IBAQBLNqaEd2ndOxmfZyMIbw5hyf2E3F/YNoHN2BtB"
+"LZ9g3ccaaNnRbobhiCPPE95Dz+I0swSdHynVv/heyNXBve6SbzJ08pGCL72CQnqt"
+"KrcgfU28elUSwhXqvfdqlS5sdJ/PHLTyxQGjhdByPq1zqwubdQxtRbeOlKyWN7Wg"
+"0I8VRw7j6IPdj/3vQQF3zCepYoUz8jcI73HPdwbeyBkdiEDPfUYd/x7H4c7/I9vG"
+"3Gm+EpYPztN2pyUGvuA6OvTMsQ3mQD4O7PkL7oo/OOgMm7HZUgHZMJ4HGdnOH2v+"
+"x3dGOqOOT6vAaWWYLW1wGI3h83LjQmFKd2J+Y1e0C80PlzNj\n"
 "-----END CERTIFICATE-----\n";
 
 // Common write callback for streaming with dual-buffer
@@ -339,8 +407,21 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         
         // Handle POST data if provided
         if (strlen(ctx->params.data_upload) > 0) {
-            // Check if it's a file upload (starts with @) or raw data size
-            if (ctx->params.data_upload[0] == '@') {
+            // Check if we have collected UART data (numeric -du parameter)
+            if (ctx->params.is_numeric_upload) {
+                if (ctx->params.collected_data != NULL && ctx->params.collected_data_size > 0) {
+                    // Use collected UART data
+                    ESP_LOGI(TAG, "POST: Using collected UART data, size: %zu bytes", ctx->params.collected_data_size);
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, ctx->params.collected_data);
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, ctx->params.collected_data_size);
+                } else {
+                    // 0 bytes expected - send empty POST
+                    ESP_LOGI(TAG, "POST: Sending empty POST (0 bytes)");
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+                }
+                
+            } else if (ctx->params.data_upload[0] == '@') {
                 // File upload - read from file
                 const char *file_path = ctx->params.data_upload + 1; // Skip @
                 ESP_LOGI(TAG, "POST: Uploading from file: %s", file_path);
@@ -364,9 +445,13 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
                 } else {
                     ESP_LOGE(TAG, "POST: Failed to open file: %s", file_path);
                 }
+            } else if (ctx->params.is_numeric_upload) {
+                // Should not reach here - numeric upload data should have been collected already
+                ESP_LOGW(TAG, "POST: Numeric upload detected but no collected data available");
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
             } else {
-                // Raw data size - for now, send empty data of specified size
-                // In a full implementation, this would read from UART
+                // Legacy: Raw data size (for backwards compatibility)
                 long data_size = atol(ctx->params.data_upload);
                 ESP_LOGI(TAG, "POST: Empty data upload, size: %ld bytes", data_size);
                 
@@ -508,6 +593,10 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     if (post_data) {
         free(post_data);
     }
+    
+    // Cleanup parameters (especially collected data)
+    bncurl_params_cleanup(&ctx->params);
+    
     curl_easy_cleanup(curl);
     
     ctx->is_running = false;

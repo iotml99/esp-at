@@ -14,10 +14,117 @@
 #include "bncurl_config.h"
 #include "bncurl_executor.h"
 #include "at_sd.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
 
 
 static bncurl_context_t *bncurl_ctx = NULL;
 
+
+static const char *TAG = "AT_BONES";
+
+// UART data collection timeout (30 seconds)
+#define UART_DATA_COLLECTION_TIMEOUT_MS 30000
+
+// Semaphore for UART data collection synchronization
+static SemaphoreHandle_t s_uart_data_sync_sema = NULL;
+
+// Callback for UART data collection
+static void uart_data_wait_callback(void)
+{
+    if (s_uart_data_sync_sema) {
+        xSemaphoreGive(s_uart_data_sync_sema);
+    }
+}
+
+/**
+ * @brief Collect data from UART with timeout for numeric -du parameter
+ * 
+ * @param expected_bytes Number of bytes to collect
+ * @param collected_data Pointer to store collected data (caller must free)
+ * @param collected_size Pointer to store actual collected size
+ * @return true if all bytes collected successfully, false on timeout or error
+ */
+static bool collect_uart_data(size_t expected_bytes, char **collected_data, size_t *collected_size)
+{
+    if (expected_bytes == 0) {
+        // Special case: 0 bytes - no data collection needed
+        *collected_data = NULL;
+        *collected_size = 0;
+        ESP_LOGI(TAG, "No UART data collection needed (0 bytes expected)");
+        return true;
+    }
+    
+    // Allocate buffer for collected data
+    *collected_data = malloc(expected_bytes + 1); // +1 for null terminator if needed
+    if (!*collected_data) {
+        ESP_LOGE(TAG, "Failed to allocate memory for UART data collection");
+        return false;
+    }
+    
+    // Create semaphore for data collection synchronization
+    if (!s_uart_data_sync_sema) {
+        s_uart_data_sync_sema = xSemaphoreCreateBinary();
+        if (!s_uart_data_sync_sema) {
+            ESP_LOGE(TAG, "Failed to create UART data sync semaphore");
+            free(*collected_data);
+            *collected_data = NULL;
+            return false;
+        }
+    }
+    
+    *collected_size = 0;
+    uint32_t timeout_ticks = pdMS_TO_TICKS(UART_DATA_COLLECTION_TIMEOUT_MS);
+    
+    ESP_LOGI(TAG, "Collecting %u bytes from UART (timeout: %d ms)", (unsigned int)expected_bytes, UART_DATA_COLLECTION_TIMEOUT_MS);
+    
+    // Enter specific mode for UART data collection
+    esp_at_port_enter_specific(uart_data_wait_callback);
+    
+    // Show prompt
+    esp_at_port_write_data((uint8_t *)">", 1);
+    
+    // Collect data using ESP-AT framework
+    while (*collected_size < expected_bytes) {
+        if (xSemaphoreTake(s_uart_data_sync_sema, timeout_ticks) == pdTRUE) {
+            // Read available data
+            size_t bytes_to_read = expected_bytes - *collected_size;
+            size_t bytes_read = esp_at_port_read_data((uint8_t *)(*collected_data + *collected_size), bytes_to_read);
+            *collected_size += bytes_read;
+            
+            ESP_LOGD(TAG, "Read %u bytes, total collected: %u/%u", 
+                     (unsigned int)bytes_read, (unsigned int)*collected_size, (unsigned int)expected_bytes);
+            
+            if (*collected_size >= expected_bytes) {
+                break;
+            }
+        } else {
+            // Timeout occurred
+            ESP_LOGW(TAG, "UART data collection timeout after %d ms", UART_DATA_COLLECTION_TIMEOUT_MS);
+            printf("ERROR: Timeout waiting for %u bytes (collected %u)\r\n", (unsigned int)expected_bytes, (unsigned int)*collected_size);
+            esp_at_port_exit_specific();
+            vSemaphoreDelete(s_uart_data_sync_sema);
+            s_uart_data_sync_sema = NULL;
+            free(*collected_data);
+            *collected_data = NULL;
+            return false;
+        }
+    }
+    
+    // Exit specific mode
+    esp_at_port_exit_specific();
+    
+    // Clean up semaphore
+    vSemaphoreDelete(s_uart_data_sync_sema);
+    s_uart_data_sync_sema = NULL;
+    
+    // Null-terminate for safety (doesn't count toward data size)
+    (*collected_data)[*collected_size] = '\0';
+    
+    ESP_LOGI(TAG, "Successfully collected %u bytes from UART", (unsigned int)*collected_size);
+    return true;
+}
 
 static uint8_t at_test_cmd_test(uint8_t *cmd_name)
 {
@@ -62,6 +169,7 @@ static uint8_t at_setup_cmd_test(uint8_t para_num)
     // Parse parameters first
     uint8_t parse_result = bncurl_parse_and_print_params(para_num, &bncurl_ctx->params);
     if (parse_result != ESP_AT_RESULT_CODE_OK) {
+        bncurl_params_cleanup(&bncurl_ctx->params);
         return parse_result;
     }
     
@@ -69,6 +177,31 @@ static uint8_t at_setup_cmd_test(uint8_t para_num)
     if (strcmp(bncurl_ctx->params.method, "GET") == 0 || 
         strcmp(bncurl_ctx->params.method, "POST") == 0 || 
         strcmp(bncurl_ctx->params.method, "HEAD") == 0) {
+        
+        // Check if we need to collect data from UART first (numeric -du)
+        if (bncurl_ctx->params.is_numeric_upload) {
+            // For numeric upload, collect data immediately before sending OK
+            char *collected_data = NULL;
+            size_t collected_size = 0;
+            
+            bool collection_success = collect_uart_data(
+                bncurl_ctx->params.upload_bytes_expected, 
+                &collected_data, 
+                &collected_size
+            );
+            
+            if (!collection_success) {
+                ESP_LOGE(TAG, "UART data collection failed");
+                bncurl_params_cleanup(&bncurl_ctx->params);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            // Store collected data in context
+            bncurl_ctx->params.collected_data = collected_data;
+            bncurl_ctx->params.collected_data_size = collected_size;
+            
+            ESP_LOGI(TAG, "Data collection successful, submitting request to executor");
+        }
         
         // Try to submit the request to the executor
         if (bncurl_executor_submit_request(bncurl_ctx)) {
@@ -78,6 +211,7 @@ static uint8_t at_setup_cmd_test(uint8_t para_num)
             return ESP_AT_RESULT_CODE_OK;
         } else {
             // Executor is busy - return ERROR
+            bncurl_params_cleanup(&bncurl_ctx->params);
             return ESP_AT_RESULT_CODE_ERROR;
         }
     } else {
@@ -85,6 +219,7 @@ static uint8_t at_setup_cmd_test(uint8_t para_num)
         uint8_t buffer[64] = {0};
         snprintf((char *)buffer, 64, "ERROR: Method %s not supported\r\n", bncurl_ctx->params.method);
         esp_at_port_write_data(buffer, strlen((char *)buffer));
+        bncurl_params_cleanup(&bncurl_ctx->params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 }

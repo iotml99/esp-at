@@ -28,6 +28,12 @@ typedef struct {
     char cookie_send[BNCURL_MAX_COOKIE_FILE_PATH + 1];                   // "-b" parameter (cookie file to send)
     char range[BNCURL_MAX_RANGE_STRING_LENGTH + 1];                      // "-r" parameter (range_start-range_end)
     bool verbose;                                                        // "-v" flag
+    
+    // Additional fields for numeric data upload
+    bool is_numeric_upload;                                              // True if -du is a number (not @file)
+    size_t upload_bytes_expected;                                        // Number of bytes to collect from UART
+    char *collected_data;                                                // Buffer for collected UART data
+    size_t collected_data_size;                                          // Actual size of collected data
 } bncurl_params_t;
 
 /**
@@ -75,5 +81,15 @@ typedef struct {
  * @return ESP_AT_RESULT_CODE_OK on success, ESP_AT_RESULT_CODE_ERROR on failure
  */
 uint8_t bncurl_parse_and_print_params(uint8_t para_num, bncurl_params_t *params);
+
+/**
+ * @brief Clean up allocated resources in bncurl_params_t structure
+ * 
+ * This function frees any dynamically allocated memory in the parameters
+ * structure, particularly the collected_data buffer used for numeric uploads.
+ * 
+ * @param params Pointer to bncurl_params_t structure to clean up
+ */
+void bncurl_params_cleanup(bncurl_params_t *params);
 
 #endif // BNCURL_PARAMS_H

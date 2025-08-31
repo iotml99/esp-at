@@ -276,10 +276,12 @@ static bool validate_param_combinations(const bncurl_params_t *params)
         return false;
     }
     
-    // POST requires data upload
-    if (strcmp(params->method, "POST") == 0 && strlen(params->data_upload) == 0) {
-        printf("ERROR: POST method requires data upload (-du)\n");
-        return false;
+    // POST can optionally have data upload, but it's not required for empty POST
+    // Empty POST requests (without -du) are valid and will send no body
+    // This explicitly allows: AT+BNCURL="POST","https://httpbin.org/post"
+    if (strcmp(params->method, "POST") == 0) {
+        ESP_LOGI(TAG, "POST method validated - data upload is optional");
+        printf("INFO: POST method validated - data upload (-du) is optional\n");
     }
     
     return true;
@@ -403,8 +405,33 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             strncpy(params->data_upload, upload_str, BNCURL_MAX_PARAMETER_LENGTH);
             params->data_upload[BNCURL_MAX_PARAMETER_LENGTH] = '\0';
             
-            // Normalize path if it starts with @ (for file uploads)
-            normalize_path_with_mount_point(params->data_upload, BNCURL_MAX_PARAMETER_LENGTH);
+            // Check if this is a numeric value (for UART input) or file path
+            if (upload_str[0] != '@') {
+                // Check if it's a valid number
+                char *endptr;
+                long bytes = strtol(upload_str, &endptr, 10);
+                
+                if (*endptr == '\0' && bytes >= 0 && bytes <= 65536) {
+                    // Valid numeric value - will collect data from UART
+                    params->is_numeric_upload = true;
+                    params->upload_bytes_expected = (size_t)bytes;
+                    ESP_LOGI(TAG, "Numeric upload detected: %u bytes expected from UART", (unsigned int)params->upload_bytes_expected);
+                    
+                    // Special case: 0 bytes is valid for empty POST
+                    if (params->upload_bytes_expected == 0) {
+                        printf("INFO: Will send empty POST data (0 bytes)\n");
+                    } else {
+                        printf("INFO: Will collect %u bytes from UART after OK\n", (unsigned int)params->upload_bytes_expected);
+                    }
+                } else {
+                    printf("ERROR: Invalid numeric value for -du: %s (must be 0-65536)\n", upload_str);
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+            } else {
+                // File path - normalize it
+                params->is_numeric_upload = false;
+                normalize_path_with_mount_point(params->data_upload, BNCURL_MAX_PARAMETER_LENGTH);
+            }
             
         } else if (strcmp(option, "-dd") == 0) {
             // Data download option
@@ -547,4 +574,22 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
 uint8_t bncurl_parse_and_print_params(uint8_t para_num, bncurl_params_t *params)
 {
     return parse_bncurl_params(para_num, params);
+}
+
+void bncurl_params_cleanup(bncurl_params_t *params)
+{
+    if (params == NULL) {
+        return;
+    }
+    
+    // Free allocated UART data buffer
+    if (params->collected_data != NULL) {
+        free(params->collected_data);
+        params->collected_data = NULL;
+        params->collected_data_size = 0;
+    }
+    
+    // Reset numeric upload fields
+    params->is_numeric_upload = false;
+    params->upload_bytes_expected = 0;
 }
