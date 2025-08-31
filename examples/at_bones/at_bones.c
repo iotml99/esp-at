@@ -16,6 +16,9 @@
 #include "at_sd.h"
 #include "util.h"
 #include "bnwps.h"
+#include "bncert.h"
+#include "bncert_manager.h"
+#include "bnwebradio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -563,6 +566,226 @@ static uint8_t at_bnwps_setup(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+// Certificate Command Handlers
+static uint8_t at_bnflash_cert_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[512] = {0};
+    snprintf((char *)buffer, 512,
+        "+BNFLASH_CERT:<flash_address>,<data_source>\r\n"
+        "Flash certificate to specified flash address\r\n"
+        "\r\n"
+        "Parameters:\r\n"
+        "  <flash_address>  Absolute flash memory address (hex: 0xNNNNNN)\r\n"
+        "  <data_source>    File path (@/path/file) or byte count (NNNN)\r\n"
+        "\r\n"
+        "Examples:\r\n"
+        "  AT+BNFLASH_CERT=0x2A000,@/certs/server_key.bin\r\n"
+        "  AT+BNFLASH_CERT=0x2A000,1400\r\n"
+        "\r\n"
+        "File mode: Certificate read from SD card file\r\n"
+        "UART mode: System prompts with '>' for certificate data\r\n"
+        "\r\n"
+        "Uses dedicated certificate partition for safe storage\r\n"
+        "Maximum data size: 65536 bytes\r\n"
+        "Address must be 4-byte aligned\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnflash_cert_setup(uint8_t *cmd_name)
+{
+    bncert_params_t cert_params;
+    
+    // Parse parameters
+    uint8_t parse_result = bncert_parse_params(esp_at_get_para_num(), &cert_params);
+    if (parse_result != ESP_AT_RESULT_CODE_OK) {
+        return parse_result;
+    }
+    
+    // Initialize certificate subsystem if not already done
+    if (!bncert_init()) {
+        printf("ERROR: Failed to initialize certificate flashing\n");
+        bncert_cleanup_params(&cert_params);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Handle UART data collection if needed
+    if (cert_params.source_type == BNCERT_SOURCE_UART) {
+        if (!bncert_collect_uart_data(&cert_params)) {
+            printf("ERROR: Failed to collect UART data\n");
+            bncert_cleanup_params(&cert_params);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+    }
+    
+    // Execute certificate flashing
+    bncert_result_t flash_result = bncert_flash_certificate(&cert_params);
+    
+    // Send result response
+    if (flash_result == BNCERT_RESULT_OK) {
+        // Send success response
+        char response[128];
+        snprintf(response, sizeof(response), 
+                "+BNFLASH_CERT:OK,0x%08X,%u\r\n", 
+                (unsigned int)cert_params.flash_address,
+                (unsigned int)(cert_params.source_type == BNCERT_SOURCE_UART ? 
+                              cert_params.collected_size : cert_params.data_size));
+        esp_at_port_write_data((uint8_t *)response, strlen(response));
+        
+        // Register certificate with certificate manager
+        size_t cert_size = (cert_params.source_type == BNCERT_SOURCE_UART) ? 
+                          cert_params.collected_size : cert_params.data_size;
+        
+        if (bncert_manager_init()) {
+            if (!bncert_manager_register(cert_params.flash_address, cert_size)) {
+                ESP_LOGW("AT_BONES", "Failed to register certificate with manager");
+            } else {
+                ESP_LOGI("AT_BONES", "Registered certificate with manager at 0x%08X", 
+                         (unsigned int)cert_params.flash_address);
+            }
+        } else {
+            ESP_LOGW("AT_BONES", "Certificate manager not available for registration");
+        }
+    } else {
+        // Send error response
+        printf("ERROR: Certificate flashing failed: %s\n", 
+               bncert_get_result_string(flash_result));
+        bncert_cleanup_params(&cert_params);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Cleanup
+    bncert_cleanup_params(&cert_params);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+// Certificate list command - lists all certificates stored in partition
+static uint8_t at_bncert_list_test(uint8_t *cmd_name)
+{
+    esp_at_port_write_data((uint8_t *)"+BNCERT_LIST: List certificates in partition\r\n", 47);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncert_list_query(uint8_t *cmd_name)
+{
+    // Initialize certificate manager
+    if (!bncert_manager_init()) {
+        printf("ERROR: Certificate manager initialization failed\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // List all certificates
+    bncert_manager_list_certificates();
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+// Web Radio command handlers
+static uint8_t at_bnweb_radio_test(uint8_t *cmd_name)
+{
+    esp_at_port_write_data((uint8_t *)"+BNWEB_RADIO:(0,1)\r\n", strlen("+BNWEB_RADIO:(0,1)\r\n"));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnweb_radio_query(uint8_t *cmd_name)
+{
+    webradio_state_t state = bnwebradio_get_state();
+    size_t bytes_streamed = 0;
+    uint32_t duration_ms = 0;
+    
+    char response[128];
+    if (bnwebradio_is_active() && bnwebradio_get_stats(&bytes_streamed, &duration_ms)) {
+        snprintf(response, sizeof(response), "+BNWEB_RADIO:1,%zu,%u\r\n", 
+                bytes_streamed, duration_ms);
+    } else {
+        snprintf(response, sizeof(response), "+BNWEB_RADIO:0\r\n");
+    }
+    
+    esp_at_port_write_data((uint8_t *)response, strlen(response));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnweb_radio_setup(uint8_t *cmd_name)
+{
+    uint8_t *cmd_ptr = cmd_name;
+    uint8_t *data_ptr;
+    char url[512] = {0};
+    int enable = 0;
+    
+    // Skip command name
+    cmd_ptr = (uint8_t *)strchr((char *)cmd_ptr, '=');
+    if (!cmd_ptr) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    cmd_ptr++; // Skip '='
+    
+    // Parse enable parameter (0 or 1)
+    data_ptr = cmd_ptr;
+    if (!esp_at_get_para_as_digit(data_ptr, &enable)) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    if (enable == 0) {
+        // Stop web radio
+        if (!bnwebradio_stop()) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        return ESP_AT_RESULT_CODE_OK;
+    } else if (enable == 1) {
+        // Start web radio - need URL parameter
+        cmd_ptr = (uint8_t *)strchr((char *)cmd_ptr, ',');
+        if (!cmd_ptr) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        cmd_ptr++; // Skip ','
+        
+        // Extract URL (remove quotes if present)
+        data_ptr = cmd_ptr;
+        if (*data_ptr == '"') {
+            data_ptr++; // Skip opening quote
+            char *end_quote = strchr((char *)data_ptr, '"');
+            if (end_quote) {
+                size_t url_len = end_quote - (char *)data_ptr;
+                if (url_len >= sizeof(url)) {
+                    return ESP_AT_RESULT_CODE_ERROR;
+                }
+                strncpy(url, (char *)data_ptr, url_len);
+                url[url_len] = '\0';
+            } else {
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+        } else {
+            // URL without quotes
+            size_t url_len = strlen((char *)data_ptr);
+            if (url_len >= sizeof(url)) {
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            strcpy(url, (char *)data_ptr);
+            
+            // Remove trailing whitespace/CRLF
+            char *end = url + strlen(url) - 1;
+            while (end > url && (*end == '\r' || *end == '\n' || *end == ' ')) {
+                *end = '\0';
+                end--;
+            }
+        }
+        
+        // Validate URL
+        if (strlen(url) == 0) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        // Start web radio streaming
+        if (!bnwebradio_start(url)) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        return ESP_AT_RESULT_CODE_OK;
+    }
+    
+    return ESP_AT_RESULT_CODE_ERROR;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
@@ -573,6 +796,9 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNSD_SPACE", at_bnsd_space_test, at_bnsd_space_query, NULL, NULL},
     {"+BNSD_FORMAT", at_bnsd_format_test, at_bnsd_format_query, NULL, at_bnsd_format_exe},
     {"+BNWPS", at_bnwps_test, at_bnwps_query, at_bnwps_setup, NULL},
+    {"+BNFLASH_CERT", at_bnflash_cert_test, NULL, at_bnflash_cert_setup, NULL},
+    {"+BNCERT_LIST", at_bncert_list_test, at_bncert_list_query, NULL, NULL},
+    {"+BNWEB_RADIO", at_bnweb_radio_test, at_bnweb_radio_query, at_bnweb_radio_setup, NULL},
 };
 
 bool esp_at_custom_cmd_register(void)
@@ -604,6 +830,24 @@ bool esp_at_custom_cmd_register(void)
     if (!bnwps_init()) {
         // WPS initialization failure is not fatal, log warning and continue
         ESP_LOGW("AT_BONES", "Failed to initialize WPS subsystem");
+    }
+    
+    // Initialize certificate flashing subsystem
+    if (!bncert_init()) {
+        // Certificate initialization failure is not fatal, log warning and continue
+        ESP_LOGW("AT_BONES", "Failed to initialize certificate flashing subsystem");
+    }
+    
+    // Initialize certificate manager subsystem
+    if (!bncert_manager_init()) {
+        // Certificate manager initialization failure is not fatal, log warning and continue
+        ESP_LOGW("AT_BONES", "Failed to initialize certificate manager subsystem");
+    }
+    
+    // Initialize web radio subsystem
+    if (!bnwebradio_init()) {
+        // Web radio initialization failure is not fatal, log warning and continue
+        ESP_LOGW("AT_BONES", "Failed to initialize web radio subsystem");
     }
     
     return esp_at_custom_cmd_array_regist(at_custom_cmd, sizeof(at_custom_cmd) / sizeof(esp_at_cmd_struct));

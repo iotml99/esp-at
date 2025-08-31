@@ -8,6 +8,7 @@
 #include "bncurl_methods.h"
 #include "bncurl_config.h"
 #include "bncurl_cookies.h"
+#include "bncert_manager.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -650,24 +651,143 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
     curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
     
-    // Configure HTTPS/TLS settings with multiple fallback strategies
+    // Configure HTTPS/TLS settings with certificate manager integration
     if (strncmp(ctx->params.url, "https://", 8) == 0) {
-        ESP_LOGI(TAG, "HTTPS detected - configuring SSL with fallback strategies");
+        ESP_LOGI(TAG, "HTTPS detected - configuring SSL with certificate manager integration");
         
-        // Strategy 1: Try hardcoded CA bundle first
-        struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
-        CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca);
+        // Certificate Manager Integration with Smart Fallback Strategy
+        bool ca_configured = false;
+        bool client_configured = false;
         
-        if (ca_result == CURLE_OK) {
-            ESP_LOGI(TAG, "Using embedded CA bundle for SSL verification");
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        // Strategy 1: Try partition certificates first if manager is initialized
+        if (bncert_manager_init()) {
+            size_t cert_count = bncert_manager_get_cert_count();
+            
+            if (cert_count > 0) {
+                ESP_LOGI(TAG, "Found %u certificates in partition, attempting to configure TLS", 
+                         (unsigned int)cert_count);
+                
+                // Scan all certificates and configure them
+                for (size_t i = 0; i < BNCERT_MAX_CERTIFICATES; i++) {
+                    bncert_metadata_t cert_meta;
+                    if (!bncert_manager_get_cert_by_index(i, &cert_meta)) {
+                        continue;
+                    }
+                    
+                    uint8_t *cert_data = NULL;
+                    if (!bncert_manager_load_cert(cert_meta.address, cert_meta.size, &cert_data)) {
+                        ESP_LOGW(TAG, "Failed to load certificate at 0x%08X", (unsigned int)cert_meta.address);
+                        continue;
+                    }
+                    
+                    // Validate certificate format
+                    if (!bncert_manager_validate_cert(cert_data, cert_meta.size)) {
+                        ESP_LOGW(TAG, "Invalid certificate format at 0x%08X", (unsigned int)cert_meta.address);
+                        free(cert_data);
+                        continue;
+                    }
+                    
+                    // Detect certificate type
+                    int cert_type = bncert_manager_detect_cert_type(cert_data, cert_meta.size);
+                    
+                    if (cert_type == 1 && !ca_configured) {
+                        // Configure as CA certificate (partition takes precedence over hardcoded)
+                        struct curl_blob ca_blob = { 
+                            .data = cert_data, 
+                            .len = cert_meta.size, 
+                            .flags = CURL_BLOB_NOCOPY 
+                        };
+                        
+                        CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca_blob);
+                        if (ca_result == CURLE_OK) {
+                            ESP_LOGI(TAG, "Using CA certificate from partition (%u bytes) - overriding hardcoded bundle", 
+                                     (unsigned int)cert_meta.size);
+                            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+                            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+                            ca_configured = true;
+                            
+                            // Store CA cert data pointer for cleanup later
+                            ctx->ca_cert_data = cert_data;
+                        } else {
+                            ESP_LOGW(TAG, "Failed to set CA certificate from partition");
+                            free(cert_data);
+                        }
+                    } else if (cert_type == 1 && ca_configured && !client_configured) {
+                        // Configure as client certificate
+                        struct curl_blob client_cert_blob = { 
+                            .data = cert_data, 
+                            .len = cert_meta.size, 
+                            .flags = CURL_BLOB_NOCOPY 
+                        };
+                        
+                        CURLcode cert_result = curl_easy_setopt(curl, CURLOPT_SSLCERT_BLOB, &client_cert_blob);
+                        if (cert_result == CURLE_OK) {
+                            ESP_LOGI(TAG, "Using client certificate from partition (%u bytes)", 
+                                     (unsigned int)cert_meta.size);
+                            ctx->client_cert_data = cert_data;
+                            client_configured = true;
+                        } else {
+                            ESP_LOGW(TAG, "Failed to set client certificate from partition");
+                            free(cert_data);
+                        }
+                    } else if (cert_type == 2 && client_configured) {
+                        // Configure as client key
+                        struct curl_blob client_key_blob = { 
+                            .data = cert_data, 
+                            .len = cert_meta.size, 
+                            .flags = CURL_BLOB_NOCOPY 
+                        };
+                        
+                        CURLcode key_result = curl_easy_setopt(curl, CURLOPT_SSLKEY_BLOB, &client_key_blob);
+                        if (key_result == CURLE_OK) {
+                            ESP_LOGI(TAG, "Using client key from partition (%u bytes)", 
+                                     (unsigned int)cert_meta.size);
+                            ctx->client_key_data = cert_data;
+                        } else {
+                            ESP_LOGW(TAG, "Failed to set client key from partition");
+                            free(cert_data);
+                        }
+                    } else if (cert_type == 2 && !client_configured) {
+                        // Found private key but no client certificate yet - store for later
+                        ESP_LOGI(TAG, "Found private key in partition, waiting for client certificate");
+                        free(cert_data); // Free for now, will be loaded again if needed
+                    } else {
+                        // Certificate not needed or duplicate
+                        free(cert_data);
+                    }
+                }
+            } else {
+                ESP_LOGI(TAG, "No certificates found in partition");
+            }
+        }
+        
+        // Strategy 2: Use hardcoded CA bundle if no partition CA certificate was configured
+        if (!ca_configured) {
+            ESP_LOGI(TAG, "Using hardcoded CA bundle for SSL verification");
+            struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
+            CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca);
+            
+            if (ca_result == CURLE_OK) {
+                ESP_LOGI(TAG, "Embedded CA bundle configured successfully");
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+                ca_configured = true;
+            } else {
+                ESP_LOGW(TAG, "Embedded CA bundle failed, using permissive SSL settings");
+                // Strategy 3: Use permissive settings for broader compatibility
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable peer verification
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
+                curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
+            }
+        }
+        
+        // Log final configuration
+        if (ca_configured && client_configured) {
+            ESP_LOGI(TAG, "SSL configured with CA certificate and client authentication");
+        } else if (ca_configured) {
+            ESP_LOGI(TAG, "SSL configured with CA certificate only");
         } else {
-            ESP_LOGW(TAG, "Embedded CA bundle failed, using permissive SSL settings");
-            // Strategy 2: Use permissive settings for broader compatibility
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable peer verification
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
-            curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
+            ESP_LOGI(TAG, "SSL configured in permissive mode");
         }
         
         // Common SSL settings for better compatibility
@@ -766,6 +886,9 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     
     // Cleanup parameters (especially collected data)
     bncurl_params_cleanup(&ctx->params);
+    
+    // Cleanup certificate data allocated during SSL configuration
+    bncurl_cleanup_certificates(ctx);
     
     curl_easy_cleanup(curl);
     
@@ -989,6 +1112,10 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     if (headers) {
         curl_slist_free_all(headers);
     }
+    
+    // Cleanup certificate data allocated during SSL configuration
+    bncurl_cleanup_certificates(ctx);
+    
     curl_easy_cleanup(curl);
     
     return success;

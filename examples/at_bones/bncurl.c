@@ -54,6 +54,11 @@ bool bncurl_init(bncurl_context_t *ctx)
     // Set default timeout value
     ctx->timeout = BNCURL_DEFAULT_TIMEOUT;
     
+    // Initialize certificate data pointers to NULL
+    ctx->ca_cert_data = NULL;
+    ctx->client_cert_data = NULL;
+    ctx->client_key_data = NULL;
+    
     return true;
 }
 
@@ -98,6 +103,30 @@ bool bncurl_stop(bncurl_context_t *ctx)
     }
     ctx->is_running = false;
     return true ;
+}
+
+void bncurl_cleanup_certificates(bncurl_context_t *ctx)
+{
+    if (!ctx)
+    {
+        return;
+    }
+    
+    // Clean up certificate data allocated by certificate manager
+    if (ctx->ca_cert_data) {
+        free(ctx->ca_cert_data);
+        ctx->ca_cert_data = NULL;
+    }
+    
+    if (ctx->client_cert_data) {
+        free(ctx->client_cert_data);
+        ctx->client_cert_data = NULL;
+    }
+    
+    if (ctx->client_key_data) {
+        free(ctx->client_key_data);
+        ctx->client_key_data = NULL;
+    }
 }
 
 void bncurl_get_progress(bncurl_context_t *ctx, uint64_t *bytes_transferred, uint64_t *bytes_total)

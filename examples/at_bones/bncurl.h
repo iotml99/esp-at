@@ -15,6 +15,11 @@ typedef struct
     uint64_t bytes_transferred;
     uint64_t bytes_total;
     bncurl_params_t params;
+    
+    // Certificate data pointers for cleanup (allocated by certificate manager)
+    uint8_t *ca_cert_data;
+    uint8_t *client_cert_data;
+    uint8_t *client_key_data;
     /* data */
 }bncurl_context_t;
 
@@ -34,6 +39,8 @@ bool bncurl_set_timeout(bncurl_context_t *ctx, uint32_t timeout);
 
 bool bncurl_stop(bncurl_context_t *ctx);
 bool bncurl_is_running(bncurl_context_t *ctx);
+
+void bncurl_cleanup_certificates(bncurl_context_t *ctx);
 
 void bncurl_get_progress(bncurl_context_t *ctx, uint64_t *bytes_transferred, uint64_t *bytes_total);
 
