@@ -680,6 +680,27 @@ static uint8_t at_bncert_list_query(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+// Certificate addresses command - lists all valid certificate storage addresses
+static uint8_t at_bncert_addr_test(uint8_t *cmd_name)
+{
+    esp_at_port_write_data((uint8_t *)"+BNCERT_ADDR: List valid certificate storage addresses\r\n", 57);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncert_addr_query(uint8_t *cmd_name)
+{
+    // Initialize certificate subsystem
+    if (!bncert_init()) {
+        printf("ERROR: Certificate subsystem initialization failed\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // List all valid addresses
+    bncert_list_valid_addresses();
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 // Web Radio command handlers
 static uint8_t at_bnweb_radio_test(uint8_t *cmd_name)
 {
@@ -755,6 +776,7 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNWPS", at_bnwps_test, at_bnwps_query, at_bnwps_setup, NULL},
     {"+BNFLASH_CERT", at_bnflash_cert_test, NULL, at_bnflash_cert_setup, NULL},
     {"+BNCERT_LIST", at_bncert_list_test, at_bncert_list_query, NULL, NULL},
+    {"+BNCERT_ADDR", at_bncert_addr_test, at_bncert_addr_query, NULL, NULL},
     {"+BNWEB_RADIO", at_bnweb_radio_test, at_bnweb_radio_query, at_bnweb_radio_setup, NULL},
 };
 

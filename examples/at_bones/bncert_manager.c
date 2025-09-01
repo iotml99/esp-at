@@ -42,10 +42,13 @@ bool bncert_manager_init(void)
 
     ESP_LOGI(TAG, "Certificate manager initialized with partition at 0x%08X (%u bytes)",
              (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
+    printf("BNCERT_MGR: Certificate manager initialized with partition at 0x%08X (%u bytes)\n",
+           (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
     // Scan partition for existing certificates
     if (!bncert_manager_scan_partition()) {
         ESP_LOGW(TAG, "Certificate partition scan failed, but manager is still functional");
+        printf("BNCERT_MGR: Warning - Certificate partition scan failed\n");
     }
 
     return true;
@@ -94,13 +97,18 @@ bool bncert_manager_scan_partition(void)
             certificates_found++;
             ESP_LOGI(TAG, "Discovered certificate at 0x%08X (%u bytes)", 
                      (unsigned int)addr, (unsigned int)cert_size);
+            printf("BNCERT_MGR: Discovered certificate at 0x%08X (%u bytes)\n", 
+                   (unsigned int)addr, (unsigned int)cert_size);
         } else {
             ESP_LOGW(TAG, "Failed to register discovered certificate at 0x%08X", (unsigned int)addr);
+            printf("BNCERT_MGR: Warning - Failed to register certificate at 0x%08X\n", (unsigned int)addr);
         }
     }
     
     ESP_LOGI(TAG, "Certificate partition scan complete: %u certificates found", 
              (unsigned int)certificates_found);
+    printf("BNCERT_MGR: Certificate partition scan complete - %u certificates found\n", 
+           (unsigned int)certificates_found);
     
     return true;
 }
@@ -255,6 +263,8 @@ bool bncert_manager_register(uint32_t address, size_t size)
             
             ESP_LOGI(TAG, "Registered certificate at 0x%08X (%u bytes)",
                      (unsigned int)address, (unsigned int)size);
+            printf("BNCERT_MGR: Certificate registered at 0x%08X (%u bytes)\n",
+                   (unsigned int)address, (unsigned int)size);
             
             return true;
         }
@@ -325,6 +335,8 @@ bool bncert_manager_load_cert(uint32_t address, size_t size, uint8_t **data_out)
     *data_out = buffer;
     ESP_LOGI(TAG, "Loaded certificate from 0x%08X (%u bytes)", 
              (unsigned int)address, (unsigned int)size);
+    printf("BNCERT_MGR: Certificate loaded from flash at 0x%08X (%u bytes)\n", 
+           (unsigned int)address, (unsigned int)size);
     
     return true;
 }

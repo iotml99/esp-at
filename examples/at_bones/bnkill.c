@@ -25,6 +25,7 @@ static const char *TAG = "BNKILL";
 static bnkill_state_t s_kill_state = BNKILL_STATE_UNCHECKED;
 static bool s_kill_initialized = false;
 static bool s_ntp_initialized = false;
+static bool s_ntp_init_attempted = false;
 
 // Month names for HTTP date parsing
 static const char* month_names[] = {
@@ -40,25 +41,53 @@ static const char* month_names[] = {
 static bool bnkill_init_ntp(void)
 {
     if (s_ntp_initialized) {
-        ESP_LOGI(TAG, "NTP already initialized");
+        ESP_LOGI(TAG, "NTP already initialized for kill switch");
         return true;
     }
     
-    ESP_LOGI(TAG, "Initializing SNTP client for kill switch");
+    // Prevent multiple initialization attempts that could cause conflicts
+    if (s_ntp_init_attempted) {
+        ESP_LOGW(TAG, "NTP initialization already attempted, using cached result");
+        return s_ntp_initialized;
+    }
     
-    // Initialize SNTP
+    s_ntp_init_attempted = true;
+    ESP_LOGI(TAG, "Attempting SNTP client initialization for kill switch");
+    
+    // Check if SNTP is already running (from other parts of the system)
+    if (esp_sntp_enabled()) {
+        ESP_LOGI(TAG, "SNTP already enabled by another component, reusing existing configuration");
+        s_ntp_initialized = true;
+        return true;
+    }
+    
+    // Set timezone to UTC for consistent kill switch operation before SNTP init
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    
+    // Wrap SNTP initialization in try-catch equivalent
+    ESP_LOGI(TAG, "Setting SNTP operating mode and servers");
+    
+    // Initialize SNTP configuration
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, BNKILL_NTP_SERVER_1);
     esp_sntp_setservername(1, BNKILL_NTP_SERVER_2);
     
-    // Set timezone to UTC for consistent kill switch operation
-    setenv("TZ", "UTC0", 1);
-    tzset();
+    ESP_LOGI(TAG, "Starting SNTP service");
     
+    // Start SNTP service
     esp_sntp_init();
-    s_ntp_initialized = true;
     
-    ESP_LOGI(TAG, "SNTP client initialized with servers: %s, %s", 
+    // Verify initialization with a small delay
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    if (!esp_sntp_enabled()) {
+        ESP_LOGE(TAG, "Failed to enable SNTP client after initialization");
+        return false;
+    }
+    
+    s_ntp_initialized = true;
+    ESP_LOGI(TAG, "SNTP client successfully initialized with servers: %s, %s", 
              BNKILL_NTP_SERVER_1, BNKILL_NTP_SERVER_2);
     
     return true;
@@ -365,5 +394,24 @@ const char* bnkill_get_status_string(void)
 void bnkill_reset_state(void)
 {
     // ESP_LOGW(TAG, "Resetting kill switch state to UNCHECKED");
+    s_kill_state = BNKILL_STATE_UNCHECKED;
+}
+
+void bnkill_deinit(void)
+{
+    if (!s_kill_initialized) {
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Deinitializing kill switch subsystem");
+    
+    // Only stop SNTP if we initialized it
+    if (s_ntp_initialized && esp_sntp_enabled()) {
+        ESP_LOGI(TAG, "Stopping SNTP client");
+        esp_sntp_stop();
+    }
+    
+    s_ntp_initialized = false;
+    s_kill_initialized = false;
     s_kill_state = BNKILL_STATE_UNCHECKED;
 }

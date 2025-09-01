@@ -139,6 +139,14 @@ void bncert_cleanup_params(bncert_params_t *params);
  */
 const char* bncert_get_result_string(bncert_result_t result);
 
+/**
+ * @brief List all valid certificate storage addresses
+ * 
+ * Prints information about valid certificate storage addresses to the console.
+ * Shows the partition range, available 4KB-aligned addresses, and usage instructions.
+ */
+void bncert_list_valid_addresses(void);
+
 #ifdef __cplusplus
 }
 #endif

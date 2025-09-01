@@ -46,6 +46,13 @@ typedef enum {
 bool bnkill_init(void);
 
 /**
+ * @brief Deinitialize kill switch subsystem
+ * 
+ * Cleans up NTP client and resets state.
+ */
+void bnkill_deinit(void);
+
+/**
  * @brief Check if firmware has expired
  * 
  * This function checks the current time (from NTP server) against the kill date.

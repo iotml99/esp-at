@@ -64,6 +64,12 @@ bool bncert_init(void)
     ESP_LOGI(TAG, "Found certificate partition: address=0x%08X, size=%u bytes", 
              (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
+    // Print valid address information
+    printf("BNCERT: Certificate partition found at 0x%08X (%u bytes)\n", 
+           (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
+    
+    bncert_list_valid_addresses();
+
     // Initialize certificate manager for automatic discovery
     if (!bncert_manager_init()) {
         ESP_LOGW(TAG, "Certificate manager initialization failed, but basic flashing will still work");
@@ -71,6 +77,7 @@ bool bncert_init(void)
 
     s_bncert_initialized = true;
     ESP_LOGI(TAG, "Certificate flashing subsystem initialized");
+    printf("BNCERT: Certificate flashing subsystem initialized successfully\n");
     return true;
 }
 
@@ -334,6 +341,8 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
 
         ESP_LOGI(TAG, "Successfully read %u bytes from certificate file", 
                  (unsigned int)data_size);
+        printf("BNCERT: Successfully loaded certificate from file: %s (%u bytes)\n", 
+               params->file_path, (unsigned int)data_size);
 
     } else {
         // Use UART data
@@ -403,12 +412,16 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
     if (result == BNCERT_RESULT_OK) {
         ESP_LOGI(TAG, "Certificate successfully flashed to 0x%08X (%u bytes)", 
                  (unsigned int)params->flash_address, (unsigned int)data_size);
+        printf("BNCERT: Certificate successfully saved to flash at 0x%08X (%u bytes)\n", 
+               (unsigned int)params->flash_address, (unsigned int)data_size);
         
         // Automatically register the certificate with the manager
         if (bncert_manager_register(params->flash_address, data_size)) {
             ESP_LOGI(TAG, "Certificate automatically registered with manager");
+            printf("BNCERT: Certificate automatically registered for TLS use\n");
         } else {
             ESP_LOGW(TAG, "Failed to register certificate with manager (flash was successful)");
+            printf("BNCERT: Warning - Certificate saved but failed to register for automatic TLS use\n");
         }
     }
 
@@ -453,4 +466,54 @@ const char* bncert_get_result_string(bncert_result_t result)
         default:
             return "Unknown error";
     }
+}
+
+void bncert_list_valid_addresses(void)
+{
+    if (!s_cert_partition) {
+        printf("BNCERT: Certificate partition not initialized\n");
+        return;
+    }
+
+    uint32_t partition_start = s_cert_partition->address;
+    uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
+    uint32_t partition_size = s_cert_partition->size;
+    
+    printf("BNCERT: Valid certificate storage addresses (4KB aligned):\n");
+    printf("BNCERT: Partition range: 0x%08X - 0x%08X (%u bytes)\n", 
+           (unsigned int)partition_start, (unsigned int)(partition_end - 1), (unsigned int)partition_size);
+    printf("BNCERT: Available 4KB-aligned addresses:\n");
+    
+    // List all valid 4KB aligned addresses
+    int count = 0;
+    for (uint32_t addr = partition_start; addr < partition_end; addr += 0x1000) {
+        if (count % 4 == 0) {
+            printf("BNCERT:   ");
+        }
+        printf("0x%08X", (unsigned int)addr);
+        count++;
+        
+        if (count % 4 == 0) {
+            printf("\n");
+        } else {
+            printf("  ");
+        }
+        
+        // Stop at reasonable number to avoid console spam
+        if (count >= 64) {
+            printf("\nBNCERT:   ... (total %u valid addresses)\n", 
+                   (unsigned int)((partition_end - partition_start) / 0x1000));
+            break;
+        }
+    }
+    
+    if (count % 4 != 0) {
+        printf("\n");
+    }
+    
+    printf("BNCERT: Total capacity: %u slots (4KB each = %u KB total)\n", 
+           (unsigned int)((partition_end - partition_start) / 0x1000),
+           (unsigned int)(partition_size / 1024));
+    printf("BNCERT: Address alignment: All addresses must be 4KB (0x1000) aligned\n");
+    printf("BNCERT: Usage: AT+BNFLASH_CERT=<address>,<@file_path_or_byte_count>\n");
 }
