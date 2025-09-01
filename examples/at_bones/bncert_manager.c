@@ -43,7 +43,167 @@ bool bncert_manager_init(void)
     ESP_LOGI(TAG, "Certificate manager initialized with partition at 0x%08X (%u bytes)",
              (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
+    // Scan partition for existing certificates
+    if (!bncert_manager_scan_partition()) {
+        ESP_LOGW(TAG, "Certificate partition scan failed, but manager is still functional");
+    }
+
     return true;
+}
+
+bool bncert_manager_scan_partition(void)
+{
+    if (!s_cert_partition) {
+        ESP_LOGE(TAG, "Certificate partition not available for scanning");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Scanning certificate partition for existing certificates...");
+    
+    uint32_t partition_start = s_cert_partition->address;
+    uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
+    size_t certificates_found = 0;
+    
+    // Scan every 4KB boundary for certificates
+    for (uint32_t addr = partition_start; addr < partition_end; addr += 0x1000) {
+        // Read first 512 bytes to check for certificate headers
+        const size_t header_size = 512;
+        uint8_t header_buffer[header_size];
+        
+        uint32_t offset = addr - partition_start;
+        esp_err_t err = esp_partition_read(s_cert_partition, offset, header_buffer, header_size);
+        if (err != ESP_OK) {
+            ESP_LOGD(TAG, "Failed to read from offset 0x%08X: %s", (unsigned int)offset, esp_err_to_name(err));
+            continue;
+        }
+        
+        // Check if this looks like a valid certificate
+        if (!bncert_manager_validate_cert(header_buffer, header_size)) {
+            continue;
+        }
+        
+        // Try to determine the actual certificate size
+        size_t cert_size = bncert_manager_estimate_cert_size(addr, header_buffer, header_size);
+        if (cert_size == 0) {
+            ESP_LOGD(TAG, "Could not determine certificate size at 0x%08X", (unsigned int)addr);
+            continue;
+        }
+        
+        // Register the found certificate
+        if (bncert_manager_register(addr, cert_size)) {
+            certificates_found++;
+            ESP_LOGI(TAG, "Discovered certificate at 0x%08X (%u bytes)", 
+                     (unsigned int)addr, (unsigned int)cert_size);
+        } else {
+            ESP_LOGW(TAG, "Failed to register discovered certificate at 0x%08X", (unsigned int)addr);
+        }
+    }
+    
+    ESP_LOGI(TAG, "Certificate partition scan complete: %u certificates found", 
+             (unsigned int)certificates_found);
+    
+    return true;
+}
+
+size_t bncert_manager_estimate_cert_size(uint32_t address, const uint8_t *header, size_t header_size)
+{
+    if (!header || header_size == 0) {
+        return 0;
+    }
+    
+    // For PEM format, look for END marker
+    if (header_size > 27 && memcmp(header, "-----BEGIN CERTIFICATE-----", 27) == 0) {
+        return bncert_manager_find_pem_end(address, "-----END CERTIFICATE-----");
+    }
+    
+    // Check for private key PEM formats
+    const char *key_markers[][2] = {
+        {"-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"},
+        {"-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"},
+        {"-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"}
+    };
+    
+    for (int i = 0; i < 3; i++) {
+        size_t begin_len = strlen(key_markers[i][0]);
+        if (header_size > begin_len && memcmp(header, key_markers[i][0], begin_len) == 0) {
+            return bncert_manager_find_pem_end(address, key_markers[i][1]);
+        }
+    }
+    
+    // For DER format, parse ASN.1 length
+    if (header_size > 4 && header[0] == 0x30 && header[1] == 0x82) {
+        // DER encoded certificate: 0x30 0x82 [length-high] [length-low]
+        size_t der_length = (header[2] << 8) | header[3];
+        return der_length + 4; // Include the header
+    }
+    
+    ESP_LOGD(TAG, "Could not estimate certificate size for unknown format");
+    return 0;
+}
+
+size_t bncert_manager_find_pem_end(uint32_t start_address, const char *end_marker)
+{
+    if (!s_cert_partition || !end_marker) {
+        return 0;
+    }
+    
+    const size_t chunk_size = 1024;
+    const size_t max_cert_size = 65536; // Maximum certificate size to search
+    size_t end_marker_len = strlen(end_marker);
+    uint32_t partition_start = s_cert_partition->address;
+    uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
+    
+    // Search for end marker in chunks
+    for (size_t offset = 0; offset < max_cert_size; offset += chunk_size - end_marker_len) {
+        uint32_t read_addr = start_address + offset;
+        
+        // Don't read beyond partition boundary
+        if (read_addr >= partition_end) {
+            break;
+        }
+        
+        size_t read_size = chunk_size;
+        if (read_addr + read_size > partition_end) {
+            read_size = partition_end - read_addr;
+        }
+        
+        uint8_t *chunk = malloc(read_size);
+        if (!chunk) {
+            ESP_LOGE(TAG, "Failed to allocate memory for PEM end search");
+            return 0;
+        }
+        
+        uint32_t partition_offset = read_addr - partition_start;
+        esp_err_t err = esp_partition_read(s_cert_partition, partition_offset, chunk, read_size);
+        if (err != ESP_OK) {
+            free(chunk);
+            ESP_LOGD(TAG, "Failed to read chunk at offset %u: %s", 
+                     (unsigned int)partition_offset, esp_err_to_name(err));
+            return 0;
+        }
+        
+        // Search for end marker in this chunk
+        for (size_t i = 0; i <= read_size - end_marker_len; i++) {
+            if (memcmp(chunk + i, end_marker, end_marker_len) == 0) {
+                // Found end marker, calculate total size
+                size_t total_size = offset + i + end_marker_len;
+                
+                // Add newline if present
+                if (i + end_marker_len < read_size && chunk[i + end_marker_len] == '\n') {
+                    total_size++;
+                }
+                
+                free(chunk);
+                ESP_LOGD(TAG, "Found PEM end marker, certificate size: %u bytes", (unsigned int)total_size);
+                return total_size;
+            }
+        }
+        
+        free(chunk);
+    }
+    
+    ESP_LOGD(TAG, "PEM end marker not found within %u bytes", (unsigned int)max_cert_size);
+    return 0;
 }
 
 void bncert_manager_deinit(void)

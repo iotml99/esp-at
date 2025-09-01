@@ -5,6 +5,7 @@
  */
 
 #include "bncert.h"
+#include "bncert_manager.h"
 #include "bncurl_params.h"
 #include "esp_flash.h"
 #include "esp_partition.h"
@@ -63,6 +64,11 @@ bool bncert_init(void)
     ESP_LOGI(TAG, "Found certificate partition: address=0x%08X, size=%u bytes", 
              (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
+    // Initialize certificate manager for automatic discovery
+    if (!bncert_manager_init()) {
+        ESP_LOGW(TAG, "Certificate manager initialization failed, but basic flashing will still work");
+    }
+
     s_bncert_initialized = true;
     ESP_LOGI(TAG, "Certificate flashing subsystem initialized");
     return true;
@@ -75,6 +81,7 @@ void bncert_deinit(void)
     }
 
     ESP_LOGI(TAG, "Deinitializing certificate flashing subsystem");
+    bncert_manager_deinit();
     s_cert_partition = NULL;
     s_bncert_initialized = false;
 }
@@ -152,7 +159,6 @@ uint8_t bncert_parse_params(uint8_t para_num, bncert_params_t *params)
     if (!bncert_validate_flash_address(params->flash_address, 
                                        params->source_type == BNCERT_SOURCE_UART ? 
                                        params->data_size : BNCERT_MAX_DATA_SIZE)) {
-        printf("ERROR: Invalid flash address: 0x%08X\n", (unsigned int)params->flash_address);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
@@ -170,30 +176,39 @@ bool bncert_validate_flash_address(uint32_t address, size_t size)
         return false;
     }
 
-    // Check if address is within certificate partition
+    // Get partition boundaries
     uint32_t partition_start = s_cert_partition->address;
     uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
     
-    if (address < partition_start || address >= partition_end) {
-        ESP_LOGE(TAG, "Flash address 0x%08X outside certificate partition (0x%08X - 0x%08X)", 
-                 (unsigned int)address, (unsigned int)partition_start, (unsigned int)partition_end);
+    // Check 4KB alignment
+    if (address % 0x1000 != 0) {
+        ESP_LOGE(TAG, "Address 0x%08X not 4KB aligned", (unsigned int)address);
+        printf("ERROR: Address must be 4KB aligned\n");
         return false;
     }
 
-    // Check that address + size doesn't exceed partition
+    // Check if address is within certificate partition bounds
+    if (address < partition_start || address >= partition_end) {
+        ESP_LOGE(TAG, "Address 0x%08X outside certificate partition bounds", (unsigned int)address);
+        printf("ERROR: Address outside certificate partition\n");
+        return false;
+    }
+
+    // Check that address + size doesn't exceed partition end
     if (address + size > partition_end) {
         ESP_LOGE(TAG, "Certificate data would exceed partition boundary");
+        printf("ERROR: Certificate data exceeds partition boundary\n");
         return false;
     }
 
-    // Check address alignment (flash typically requires 4-byte alignment)
-    if (address % 4 != 0) {
-        ESP_LOGE(TAG, "Flash address 0x%08X not 4-byte aligned", (unsigned int)address);
+    // Check size is reasonable
+    if (size == 0 || size > BNCERT_MAX_DATA_SIZE) {
+        ESP_LOGE(TAG, "Invalid certificate size: %u", (unsigned int)size);
+        printf("ERROR: Invalid certificate size\n");
         return false;
     }
 
-    ESP_LOGI(TAG, "Flash address 0x%08X validated for %u bytes within certificate partition", 
-             (unsigned int)address, (unsigned int)size);
+    ESP_LOGI(TAG, "Address 0x%08X validated for %u bytes", (unsigned int)address, (unsigned int)size);
     return true;
 }
 
@@ -388,6 +403,13 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
     if (result == BNCERT_RESULT_OK) {
         ESP_LOGI(TAG, "Certificate successfully flashed to 0x%08X (%u bytes)", 
                  (unsigned int)params->flash_address, (unsigned int)data_size);
+        
+        // Automatically register the certificate with the manager
+        if (bncert_manager_register(params->flash_address, data_size)) {
+            ESP_LOGI(TAG, "Certificate automatically registered with manager");
+        } else {
+            ESP_LOGW(TAG, "Failed to register certificate with manager (flash was successful)");
+        }
     }
 
 cleanup:

@@ -542,14 +542,14 @@ AT+BNFLASH_CERT=<address>,<data_source>
 
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|
-| `address` | Hex | 0x340000-0x43FFFF | Flash address in certificate partition |
+| `address` | Hex | 0x380000-0x3BFFFF | Flash address in certificate partition |
 | `data_source` | String | uart/file | Data source (uart for direct input) |
 
 #### Certificate Partition Layout
 
 | Address Range | Size | Purpose |
 |---------------|------|---------|
-| 0x340000-0x343FFF | 16KB | Certificate 1 |
+| 0x380000-0x383FFF | 16KB | Certificate 1 |
 | 0x344000-0x347FFF | 16KB | Certificate 2 |
 | 0x348000-0x34BFFF | 16KB | Certificate 3 |
 | ... | ... | ... |
@@ -572,7 +572,7 @@ MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJ...
 
 **1. Flash CA Certificate via UART**
 ```
-AT+BNFLASH_CERT=0x340000,uart
+AT+BNFLASH_CERT=0x380000,uart
 OK
 >
 -----BEGIN CERTIFICATE-----
@@ -625,9 +625,9 @@ AT+BNCERT_LIST=?             # Test command
 
 ```
 AT+BNCERT_LIST?
-+BNCERT_LIST:0,0x340000,1584,1
-+BNCERT_LIST:1,0x344000,1124,2
-+BNCERT_LIST:2,0x348000,1679,3
++BNCERT_LIST:0,0x380000,1584,1
++BNCERT_LIST:1,0x384000,1124,2
++BNCERT_LIST:2,0x388000,1679,3
 OK
 ```
 
@@ -808,8 +808,8 @@ Web radio automatically integrates with certificate management:
 
 ```c
 // bncert_manager.h
-#define BNCERT_PARTITION_OFFSET         0x340000  // Certificate partition start
-#define BNCERT_PARTITION_SIZE           0x100000  // 1MB certificate partition
+#define BNCERT_PARTITION_OFFSET         0x380000  // Certificate partition start
+#define BNCERT_PARTITION_SIZE           0x40000   // 256KB certificate partition
 #define BNCERT_MAX_CERTIFICATES         64        // Maximum stored certificates
 #define BNCERT_MAX_CERT_SIZE            16384     // 16KB per certificate slot
 #define BNCERT_MAGIC_HEADER             0xCERT    // Certificate validation magic
@@ -878,17 +878,17 @@ Web radio automatically integrates with certificate management:
 # Name,       Type, SubType, Offset,  Size,     Flags
 nvs,          data, nvs,     0x9000,  0x6000,
 phy_init,     data, phy,     0xf000,  0x1000,
-factory,      app,  factory, 0x10000, 0x200000,
-certificates, data, 0x99,    0x340000, 0x100000,  # 1MB for certificates
-storage,      data, fat,     0x440000, 0x100000,  # 1MB for file storage
+factory,      app,  factory, 0x40000, 0x340000,
+certificates, data, 0x99,    0x380000, 0x40000,   # 256KB for certificates
+storage,      data, fat,     0x3C0000, 0x100000,  # 1MB for file storage
 ```
 
 #### Certificate Partition Details
 
 - **Type:** `data` (0x01)
 - **SubType:** `0x99` (custom type for certificates)
-- **Size:** 1MB (0x100000 bytes)
-- **Address:** 0x340000-0x43FFFF
+- **Size:** 256KB (0x40000 bytes)
+- **Address:** 0x380000-0x3BFFFF
 - **Slots:** 64 certificate slots of 16KB each
 
 ### Network Configuration
@@ -1367,7 +1367,7 @@ AT+BNCURL=GET,"http://httpbin.org/get"
 ```bash
 # Debug: List certificates
 AT+BNCERT_LIST?
-+BNCERT_LIST:0,0x340000,1584,1
++BNCERT_LIST:0,0x380000,1584,1
 OK
 
 # Test with HTTP first
@@ -1488,7 +1488,7 @@ idf.py flash
 **Reset specific components:**
 ```bash
 # Clear certificate partition
-esptool.py --port COM3 erase_region 0x340000 0x100000
+esptool.py --port COM3 erase_region 0x380000 0x40000
 
 # Clear NVS (WiFi settings)
 esptool.py --port COM3 erase_region 0x9000 0x6000

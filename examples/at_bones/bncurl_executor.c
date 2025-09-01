@@ -198,8 +198,7 @@ bool bncurl_executor_submit_request(bncurl_context_t *ctx)
     }
     
     // Perform kill switch check before executing any BNCURL command
-    // Pass NULL for http_date_header since we don't have it yet
-    if (!bnkill_check_expiry(NULL)) {
+    if (!bnkill_check_expiry()) {
         ESP_LOGE(TAG, "FIRMWARE EXPIRED");
         return false;
     }

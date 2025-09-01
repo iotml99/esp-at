@@ -20,10 +20,31 @@
 
 // Pin assignments for SD card (based on ESP-IDF example)
 
+#ifdef STEPHAN_BUILD
+
+/*
++--------------+----------+-------+
+* | SPI Pin | ESP32‑C6 | SD_MMC
++==============+==========+=======+
+* | CS (SS) | GPIO18 | DAT3
++--------------+----------+-------+
+* | DI (MOSI) | GPIO19 | CMD
++--------------+----------+-------+
+* | DO (MISO) | GPIO20 | DAT0
++--------------+----------+-------+
+* | SCK (SCLK) | GPIO21 | CLK
++--------------+----------+-------+
+*/
+#define PIN_NUM_CS    18
+#define PIN_NUM_MOSI  19
+#define PIN_NUM_CLK   21
+#define PIN_NUM_MISO  20
+#else
 #define PIN_NUM_CS    20
 #define PIN_NUM_MOSI  21
 #define PIN_NUM_CLK   17
 #define PIN_NUM_MISO  16
+#endif
 
 static const char *TAG = "AT_SD";
 

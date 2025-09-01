@@ -19,7 +19,6 @@ typedef struct {
     bncurl_context_t *ctx;              // Main BNCURL context
     bncurl_stream_context_t *stream;    // Streaming context
     bncurl_cookie_context_t *cookies;   // Cookie context for handling cookies
-    char *http_date_header;             // HTTP Date header for kill switch (dynamically allocated)
 } bncurl_common_context_t;
 
 /**

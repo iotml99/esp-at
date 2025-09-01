@@ -6,7 +6,7 @@ This guide covers testing the integration between certificate flashing (`AT+BNFL
 
 The certificate manager provides a bridge between flashed certificates and the HTTPS/TLS stack:
 
-1. **Certificate Storage**: Certificates are stored in a dedicated 1MB partition (0x340000-0x440000)
+1. **Certificate Storage**: Certificates are stored in a dedicated 256KB partition (0x380000-0x3C0000)
 2. **Automatic Registration**: Flashed certificates are automatically registered with the certificate manager
 3. **Type Detection**: Certificate types (CA cert, client cert, private key) are automatically detected by content
 4. **TLS Integration**: HTTPS requests automatically use partition certificates when available
@@ -20,8 +20,10 @@ The certificate flashing command now only requires 2 parameters:
 AT+BNFLASH_CERT=<flash_address>,<data_source>
 ```
 
-- **flash_address**: Hex address in certificate partition (0x340000-0x440000)
+- **flash_address**: Hex address in certificate partition (0x380000-0x3C0000) - **MUST be 4KB aligned**
 - **data_source**: Either `@/path/to/file` or byte count for UART input
+
+**Important:** All addresses must be 4KB (0x1000) aligned. Valid addresses: 0x380000, 0x381000, 0x382000, etc.
 
 **Certificate types and names are automatically detected** - no need to specify them!
 
@@ -42,12 +44,12 @@ AT+BNFLASH_CERT=<flash_address>,<data_source>
 
 #### Step 1: Flash a CA Certificate
 ```
-AT+BNFLASH_CERT=0x340000,@/certs/ca_cert.pem
+AT+BNFLASH_CERT=0x380000,@/certs/ca_cert.pem
 ```
 
 Expected response:
 ```
-+BNFLASH_CERT:OK,0x00340000,<size>
++BNFLASH_CERT:OK,0x00380000,<size>
 OK
 ```
 
@@ -59,7 +61,7 @@ AT+BNCERT_LIST?
 Expected response:
 ```
 +BNCERT_LIST:1,16
-+BNCERT_ENTRY:0x00340000,<size>,"CERTIFICATE"
++BNCERT_ENTRY:0x00380000,<size>,"CERTIFICATE"
 OK
 ```
 
@@ -78,8 +80,8 @@ Expected behavior:
 
 #### Step 1: Flash Client Certificate and Key
 ```
-AT+BNFLASH_CERT=0x350000,@/certs/client_cert.pem
-AT+BNFLASH_CERT=0x360000,@/certs/client_key.pem
+AT+BNFLASH_CERT=0x381000,@/certs/client_cert.pem
+AT+BNFLASH_CERT=0x382000,@/certs/client_key.pem
 ```
 
 #### Step 2: Verify Both Certificates
@@ -90,8 +92,8 @@ AT+BNCERT_LIST?
 Expected response:
 ```
 +BNCERT_LIST:2,16
-+BNCERT_ENTRY:0x00350000,<size1>,"CERTIFICATE"
-+BNCERT_ENTRY:0x00360000,<size2>,"PRIVATE_KEY"
++BNCERT_ENTRY:0x00390000,<size1>,"CERTIFICATE"
++BNCERT_ENTRY:0x003A0000,<size2>,"PRIVATE_KEY"
 OK
 ```
 
@@ -109,9 +111,9 @@ Expected behavior:
 
 #### Step 1: Flash Multiple Certificates
 ```
-AT+BNFLASH_CERT=0x340000,@/certs/ca_cert.pem
-AT+BNFLASH_CERT=0x350000,@/certs/client_cert.pem  
-AT+BNFLASH_CERT=0x360000,@/certs/client_key.pem
+AT+BNFLASH_CERT=0x380000,@/certs/ca_cert.pem
+AT+BNFLASH_CERT=0x390000,@/certs/client_cert.pem  
+AT+BNFLASH_CERT=0x3A0000,@/certs/client_key.pem
 ```
 
 #### Step 2: Verify Auto-Detection
@@ -122,9 +124,9 @@ AT+BNCERT_LIST?
 Expected response:
 ```
 +BNCERT_LIST:3,16
-+BNCERT_ENTRY:0x00340000,<size1>,"CERTIFICATE"
-+BNCERT_ENTRY:0x00350000,<size2>,"CERTIFICATE" 
-+BNCERT_ENTRY:0x00360000,<size3>,"PRIVATE_KEY"
++BNCERT_ENTRY:0x00380000,<size1>,"CERTIFICATE"
++BNCERT_ENTRY:0x00390000,<size2>,"CERTIFICATE" 
++BNCERT_ENTRY:0x003A0000,<size3>,"PRIVATE_KEY"
 OK
 ```
 
@@ -144,7 +146,7 @@ Expected behavior:
 
 #### Step 1: Flash Certificate via UART
 ```
-AT+BNFLASH_CERT=0x340000,2048
+AT+BNFLASH_CERT=0x3B0000,2048
 ```
 
 Expected prompt:
@@ -188,13 +190,13 @@ The certificate manager automatically detects certificate types by analyzing con
 1. **Check Certificate Manager Initialization**:
    ```
    # Look for log message:
-   I (xxxxx) BNCERT_MGR: Certificate manager initialized with partition at 0x00340000 (1048576 bytes)
+   I (xxxxx) BNCERT_MGR: Certificate manager initialized with partition at 0x00380000 (262144 bytes)
    ```
 
 2. **Verify Certificate Loading and Detection**:
    ```
    # Look for log messages:
-   I (xxxxx) BNCERT_MGR: Loaded certificate from 0x00340000 (xxxx bytes)
+   I (xxxxx) BNCERT_MGR: Loaded certificate from 0x00380000 (xxxx bytes)
    D (xxxxx) BNCERT_MGR: Detected PEM certificate format
    I (xxxxx) BNCURL_COMMON: Using CA certificate from partition (xxxx bytes)
    ```
@@ -227,7 +229,7 @@ I (xxxxx) BNCURL_COMMON: Using hardcoded CA bundle for SSL verification
 
 #### Issue 3: Certificate Loading Failed
 ```
-W (xxxxx) BNCERT_MGR: Failed to load certificate at 0x00340000
+W (xxxxx) BNCERT_MGR: Failed to load certificate at 0x00380000
 ```
 
 **Solution**: Check flash address is within partition bounds and certificate was flashed successfully.
@@ -244,12 +246,12 @@ W (xxxxx) BNCERT_MGR: Failed to load certificate at 0x00340000
 
 ```bash
 # Flash certificates (simplified syntax)
-AT+BNFLASH_CERT=0x340000,@/certs/ca_cert.pem
-AT+BNFLASH_CERT=0x350000,@/certs/client_cert.pem
-AT+BNFLASH_CERT=0x360000,@/certs/client_key.pem
+AT+BNFLASH_CERT=0x380000,@/certs/ca_cert.pem
+AT+BNFLASH_CERT=0x390000,@/certs/client_cert.pem
+AT+BNFLASH_CERT=0x3A0000,@/certs/client_key.pem
 
 # Flash via UART
-AT+BNFLASH_CERT=0x370000,2048
+AT+BNFLASH_CERT=0x3B0000,2048
 
 # List certificates (shows auto-detected types)
 AT+BNCERT_LIST?

@@ -60,6 +60,41 @@ typedef struct {
 bool bncert_manager_init(void);
 
 /**
+ * @brief Scan certificate partition for existing certificates
+ * 
+ * Scans the certificate partition at 4KB boundaries looking for valid
+ * certificates and automatically registers them.
+ * 
+ * @return true on success, false on failure
+ */
+bool bncert_manager_scan_partition(void);
+
+/**
+ * @brief Estimate certificate size from header data
+ * 
+ * Analyzes certificate header to determine the full certificate size.
+ * Supports both PEM and DER formats.
+ * 
+ * @param address Flash address where certificate starts
+ * @param header Certificate header data (first 512 bytes)
+ * @param header_size Size of header data
+ * @return Estimated certificate size in bytes, or 0 if unable to determine
+ */
+size_t bncert_manager_estimate_cert_size(uint32_t address, const uint8_t *header, size_t header_size);
+
+/**
+ * @brief Find PEM certificate end marker
+ * 
+ * Searches for PEM end marker starting from given address to determine
+ * the complete certificate size.
+ * 
+ * @param start_address Address where certificate begins
+ * @param end_marker PEM end marker to search for (e.g. "-----END CERTIFICATE-----")
+ * @return Certificate size including end marker, or 0 if not found
+ */
+size_t bncert_manager_find_pem_end(uint32_t start_address, const char *end_marker);
+
+/**
  * @brief Deinitialize certificate manager
  * 
  * Cleans up certificate manager resources.

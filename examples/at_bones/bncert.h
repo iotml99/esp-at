@@ -24,7 +24,7 @@ extern "C" {
 /**
  * @brief Maximum certificate data size that can be flashed at once
  */
-#define BNCERT_MAX_DATA_SIZE 65536
+#define BNCERT_MAX_DATA_SIZE (4 * 1024)
 
 /**
  * @brief Certificate data source type

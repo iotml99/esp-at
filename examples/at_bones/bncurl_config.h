@@ -121,6 +121,15 @@
 /** TLS handshake timeout (seconds) */
 #define BNCURL_TLS_TIMEOUT              15
 
+/** File download low speed timeout (seconds) - for SD card operations */
+#define BNCURL_FILE_LOW_SPEED_TIME      120
+
+/** File download minimum speed (bytes/sec) - very lenient for SD card writes */
+#define BNCURL_FILE_LOW_SPEED_LIMIT     10
+
+/** File download total timeout (seconds) - for very large files */
+#define BNCURL_FILE_TOTAL_TIMEOUT       7200
+
 /* ==================== Memory Configuration ==================== */
 /** Maximum memory allocation for single operation (ESP32 constraint) */
 #define BNCURL_MAX_MEMORY_ALLOCATION    (512 * 1024)  // 512KB

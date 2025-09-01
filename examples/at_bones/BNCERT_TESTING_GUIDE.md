@@ -22,7 +22,7 @@ The BNCERT library implements certificate flashing functionality for the ESP32 A
 
 ### Core Certificate Flow:
 1. **Parameter Parsing**: Validate flash address and data source type
-2. **Address Validation**: Ensure flash address is in safe range (0x200000-0x3F0000)
+2. **Address Validation**: Ensure flash address is in certificate partition (0x380000-0x3C0000)
 3. **Data Collection**:
    - File mode: Read certificate from SD card file
    - UART mode: Prompt with '>' and collect specified bytes
@@ -30,10 +30,10 @@ The BNCERT library implements certificate flashing functionality for the ESP32 A
 5. **Response**: Success confirmation with address and size
 
 ### Flash Safety Zones:
-- **Safe Range**: 0x200000 - 0x3F0000 (2MB - 4MB range)
-- **Avoided Areas**: Bootloader, partition table, application code, NVS
+- **Certificate Partition**: 0x380000 - 0x3C0000 (256KB dedicated for certificates)
+- **Avoided Areas**: Bootloader, partition table, application code (0x40000-0x380000), NVS
 - **Alignment**: 4-byte address alignment required
-- **Maximum Size**: 65536 bytes per certificate
+- **Maximum Size**: 65536 bytes per certificate (limited by implementation)
 
 ## Test Examples
 
@@ -43,56 +43,56 @@ The BNCERT library implements certificate flashing functionality for the ESP32 A
 AT+BNSD_MOUNT
 
 # Flash certificate from file
-AT+BNFLASH_CERT=0x2A000,@/certs/server_key.bin
+AT+BNFLASH_CERT=0x380000,@/certs/server_key.bin
 
 # Expected response:
-# +BNFLASH_CERT:OK,0x0002A000,1432
+# +BNFLASH_CERT:OK,0x00380000,1432
 # OK
 ```
 
 ### Test 2: Certificate from UART
 ```bash
 # Flash certificate via UART (1400 bytes)
-AT+BNFLASH_CERT=0x2B000,1400
+AT+BNFLASH_CERT=0x390000,1400
 
 # System responds with prompt:
 # >
 # (Send 1400 bytes of certificate data now)
 
 # Expected response after data:
-# +BNFLASH_CERT:OK,0x0002B000,1400
+# +BNFLASH_CERT:OK,0x00390000,1400
 # OK
 ```
 
 ### Test 3: Multiple Certificates
 ```bash
 # Flash server certificate
-AT+BNFLASH_CERT=0x2A000,@/certs/server.crt
+AT+BNFLASH_CERT=0x380000,@/certs/server.crt
 
 # Flash server private key
-AT+BNFLASH_CERT=0x2C000,@/certs/server.key
+AT+BNFLASH_CERT=0x390000,@/certs/server.key
 
 # Flash CA certificate
-AT+BNFLASH_CERT=0x2E000,@/certs/ca.crt
+AT+BNFLASH_CERT=0x3A0000,@/certs/ca.crt
 ```
 
 ### Test 4: Error Conditions
 ```bash
-# Invalid flash address (too low)
+# Invalid flash address (outside certificate partition)
 AT+BNFLASH_CERT=0x1000,@/certs/test.crt
 # Expected: ERROR: Invalid flash address: 0x00001000
 
 # Non-existent file
-AT+BNFLASH_CERT=0x2A000,@/missing/file.crt
+AT+BNFLASH_CERT=0x380000,@/missing/file.crt
 # Expected: ERROR: Certificate flashing failed: File operation error
 
 # Invalid data size
-AT+BNFLASH_CERT=0x2A000,100000
+AT+BNFLASH_CERT=0x380000,100000
 # Expected: ERROR: Invalid data size: 100000 (must be 0-65536)
 
 # Non-aligned address
-AT+BNFLASH_CERT=0x2A001,@/certs/test.crt
-# Expected: ERROR: Flash address 0x0002A001 not 4-byte aligned
+AT+BNFLASH_CERT=0x380001,@/certs/test.crt
+# Expected: ERROR: Flash address 0x00380001 not 4-byte aligned
 ```
 
 ### Test 5: Help and Information
@@ -112,17 +112,17 @@ AT+BNFLASH_CERT=?
 
 ### Successful Certificate Flashing:
 ```
-AT+BNFLASH_CERT=0x2A000,@/certs/server.crt
-+BNFLASH_CERT:OK,0x0002A000,1432
+AT+BNFLASH_CERT=0x380000,@/certs/server.crt
++BNFLASH_CERT:OK,0x00380000,1432
 OK
 ```
 
 ### UART Data Collection:
 ```
-AT+BNFLASH_CERT=0x2A000,1400
+AT+BNFLASH_CERT=0x390000,1400
 >
 (Certificate data transmitted here - 1400 bytes)
-+BNFLASH_CERT:OK,0x0002A000,1400
++BNFLASH_CERT:OK,0x00390000,1400
 OK
 ```
 
@@ -131,10 +131,10 @@ OK
 AT+BNFLASH_CERT=0x1000,@/test.crt
 ERROR: Invalid flash address: 0x00001000
 
-AT+BNFLASH_CERT=0x2A000,@/missing.crt
+AT+BNFLASH_CERT=0x380000,@/missing.crt
 ERROR: Certificate flashing failed: File operation error
 
-AT+BNFLASH_CERT=0x2A000,100000
+AT+BNFLASH_CERT=0x380000,100000
 ERROR: Invalid data size: 100000 (must be 0-65536)
 ```
 
@@ -156,19 +156,19 @@ ERROR: Invalid data size: 100000 (must be 0-65536)
 
 ### Recommended Address Layout:
 ```
-0x200000 - 0x220000  : Server certificates (128KB)
-0x220000 - 0x240000  : Client certificates (128KB)  
-0x240000 - 0x260000  : CA certificates (128KB)
-0x260000 - 0x280000  : Private keys (128KB)
-0x280000 - 0x300000  : Reserved for expansion (512KB)
+0x380000 - 0x390000  : Server certificates (64KB)
+0x390000 - 0x3A0000  : Client certificates (64KB)  
+0x3A0000 - 0x3B0000  : Private keys (64KB)
+0x3B0000 - 0x3C0000  : CA certificates (64KB)
 ```
 
 ### Address Calculation:
 ```
-Base address: 0x200000 (2MB)
-Certificate 1: 0x200000
-Certificate 2: 0x200000 + previous_size (rounded to 4KB boundary)
-Certificate 3: 0x200000 + cumulative_size (rounded to 4KB boundary)
+Base address: 0x380000 (Certificate partition start)
+Certificate 1: 0x380000
+Certificate 2: 0x380000 + previous_size (rounded to 4KB boundary)
+Certificate 3: 0x380000 + cumulative_size (rounded to 4KB boundary)
+Maximum address: 0x3C0000 (Certificate partition end)
 ```
 
 ## Hardware Requirements
@@ -226,7 +226,7 @@ Solutions:
 ERROR: Invalid flash address: 0x00010000
 
 Solutions:
-- Use addresses >= 0x200000
+- Use addresses within certificate partition (0x380000-0x3C0000)
 - Check partition table for safe regions
 - Ensure 4-byte address alignment
 ```
@@ -273,6 +273,7 @@ Solutions:
 - **Certificate Buffer**: Equal to certificate size (up to 64KB)
 - **Verification Buffer**: Additional copy for read-back verification
 - **Flash Sector Buffer**: 4KB for erase operations
+- **Total RAM needed**: ~128KB for largest certificates (64KB cert + 64KB verify buffer)
 
 ### Flash Wear:
 - **Erase Cycles**: Modern flash supports 10,000+ erase cycles
@@ -282,12 +283,12 @@ Solutions:
 ## Integration Notes
 
 ### Flash Layout Coordination:
-- Coordinate with partition table design
-- Reserve dedicated certificate flash regions  
-- Avoid conflicts with OTA update areas
+- Coordinate with partition table design (certificates at 0x380000-0x3C0000)
+- Reserve dedicated certificate flash regions (256KB total)
+- Avoid conflicts with factory app at 0x40000-0x380000
 
 ### Certificate Management:
-- Plan certificate update procedures
+- Plan certificate update procedures within 256KB limit
 - Implement certificate validation after flashing
 - Consider certificate expiration handling
 
@@ -298,6 +299,7 @@ Solutions:
 
 ---
 
-*Last Updated: August 31, 2025*
-*Certificate Flashing Implementation Version: 1.0*
+*Last Updated: September 1, 2025*
+*Certificate Flashing Implementation Version: 1.1*
 *Compatible with ESP-AT Framework*
+*Certificate Partition: 0x380000-0x3C0000 (256KB)*
