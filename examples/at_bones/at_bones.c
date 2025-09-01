@@ -592,71 +592,74 @@ static uint8_t at_bnflash_cert_test(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
+// Global certificate parameters for sharing between setup and execution phases
+static bncert_params_t g_cert_params;
+
 static uint8_t at_bnflash_cert_setup(uint8_t para_num)
 {
-    bncert_params_t cert_params;
-    
     // Parse parameters - we expect exactly 2 parameters: flash_address and data_source
-    uint8_t parse_result = bncert_parse_params(para_num, &cert_params);
+    uint8_t parse_result = bncert_parse_params(para_num, &g_cert_params);
     if (parse_result != ESP_AT_RESULT_CODE_OK) {
         return parse_result;
     }
     
     // Initialize certificate subsystem if not already done
     if (!bncert_init()) {
-        printf("ERROR: Failed to initialize certificate flashing\n");
-        bncert_cleanup_params(&cert_params);
+        esp_at_port_write_data((uint8_t *)"ERROR: Failed to initialize certificate flashing\r\n", 51);
+        bncert_cleanup_params(&g_cert_params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // Handle UART data collection if needed
-    if (cert_params.source_type == BNCERT_SOURCE_UART) {
-        if (!bncert_collect_uart_data(&cert_params)) {
-            printf("ERROR: Failed to collect UART data\n");
-            bncert_cleanup_params(&cert_params);
+    if (g_cert_params.source_type == BNCERT_SOURCE_UART) {
+        if (!bncert_collect_uart_data(&g_cert_params)) {
+            esp_at_port_write_data((uint8_t *)"ERROR: Failed to collect certificate data from UART\r\n", 54);
+            bncert_cleanup_params(&g_cert_params);
             return ESP_AT_RESULT_CODE_ERROR;
         }
     }
     
-    // Execute certificate flashing
-    bncert_result_t flash_result = bncert_flash_certificate(&cert_params);
+    // Execute certificate flashing (for both file and UART sources)
+    bncert_result_t flash_result = bncert_flash_certificate(&g_cert_params);
     
     // Send result response
     if (flash_result == BNCERT_RESULT_OK) {
         // Send success response
         char response[128];
+        size_t data_size = (g_cert_params.source_type == BNCERT_SOURCE_UART) ? 
+                          g_cert_params.collected_size : g_cert_params.data_size;
+        
         snprintf(response, sizeof(response), 
                 "+BNFLASH_CERT:OK,0x%08X,%u\r\n", 
-                (unsigned int)cert_params.flash_address,
-                (unsigned int)(cert_params.source_type == BNCERT_SOURCE_UART ? 
-                              cert_params.collected_size : cert_params.data_size));
+                (unsigned int)g_cert_params.flash_address,
+                (unsigned int)data_size);
         esp_at_port_write_data((uint8_t *)response, strlen(response));
         
         // Register certificate with certificate manager
-        size_t cert_size = (cert_params.source_type == BNCERT_SOURCE_UART) ? 
-                          cert_params.collected_size : cert_params.data_size;
-        
         if (bncert_manager_init()) {
-            if (!bncert_manager_register(cert_params.flash_address, cert_size)) {
+            if (!bncert_manager_register(g_cert_params.flash_address, data_size)) {
                 ESP_LOGW("AT_BONES", "Failed to register certificate with manager");
             } else {
                 ESP_LOGI("AT_BONES", "Registered certificate with manager at 0x%08X", 
-                         (unsigned int)cert_params.flash_address);
+                         (unsigned int)g_cert_params.flash_address);
             }
         } else {
             ESP_LOGW("AT_BONES", "Certificate manager not available for registration");
         }
+        
+        bncert_cleanup_params(&g_cert_params);
+        return ESP_AT_RESULT_CODE_OK;
     } else {
         // Send error response
-        printf("ERROR: Certificate flashing failed: %s\n", 
-               bncert_get_result_string(flash_result));
-        bncert_cleanup_params(&cert_params);
+        char error_response[128];
+        snprintf(error_response, sizeof(error_response),
+                "ERROR: Certificate flashing failed: %s\r\n",
+                bncert_get_result_string(flash_result));
+        esp_at_port_write_data((uint8_t *)error_response, strlen(error_response));
+        
+        bncert_cleanup_params(&g_cert_params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    
-    // Cleanup
-    bncert_cleanup_params(&cert_params);
-    return ESP_AT_RESULT_CODE_OK;
 }
 
 // Certificate list command - lists all certificates stored in partition
@@ -699,6 +702,74 @@ static uint8_t at_bncert_addr_query(uint8_t *cmd_name)
     bncert_list_valid_addresses();
     
     return ESP_AT_RESULT_CODE_OK;
+}
+
+// Certificate clear command - clears (erases) certificate at specific address
+static uint8_t at_bncert_clear_test(uint8_t *cmd_name)
+{
+    esp_at_port_write_data((uint8_t *)"+BNCERT_CLEAR:<address>\r\n", 25);
+    esp_at_port_write_data((uint8_t *)"Clear certificate at specified flash address\r\n", 47);
+    esp_at_port_write_data((uint8_t *)"Address must be 4KB aligned and within certificate partition\r\n", 62);
+    esp_at_port_write_data((uint8_t *)"Example: AT+BNCERT_CLEAR=0x380000\r\n", 36);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncert_clear_setup(uint8_t para_num)
+{
+    // Need exactly 1 parameter: address
+    if (para_num != 1) {
+        esp_at_port_write_data((uint8_t *)"ERROR: AT+BNCERT_CLEAR requires exactly 1 parameter: <address>\r\n", 66);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    // Parse address parameter
+    int32_t addr_value;
+    if (esp_at_get_para_as_digit(0, &addr_value) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        esp_at_port_write_data((uint8_t *)"ERROR: Invalid address parameter\r\n", 34);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    uint32_t address = (uint32_t)addr_value;
+
+    // Initialize certificate manager
+    if (!bncert_manager_init()) {
+        esp_at_port_write_data((uint8_t *)"ERROR: Certificate manager initialization failed\r\n", 50);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    // Clear the certificate
+    if (bncert_manager_clear_cert(address)) {
+        char response[64];
+        int len = snprintf(response, sizeof(response), "+BNCERT_CLEAR:OK,0x%08X\r\n", (unsigned int)address);
+        esp_at_port_write_data((uint8_t *)response, len);
+        return ESP_AT_RESULT_CODE_OK;
+    } else {
+        char response[64];
+        int len = snprintf(response, sizeof(response), "+BNCERT_CLEAR:ERROR,0x%08X\r\n", (unsigned int)address);
+        esp_at_port_write_data((uint8_t *)response, len);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+}
+
+// Certificate flash command (alias for BNFLASH_CERT with more intuitive name)
+static uint8_t at_bncert_flash_test(uint8_t *cmd_name)
+{
+    esp_at_port_write_data((uint8_t *)"+BNCERT_FLASH:<flash_address>,<data_source>\r\n", 46);
+    esp_at_port_write_data((uint8_t *)"Flash certificate data to partition\r\n", 38);
+    esp_at_port_write_data((uint8_t *)"Parameters:\r\n", 13);
+    esp_at_port_write_data((uint8_t *)"  flash_address: 4KB-aligned address in certificate partition\r\n", 64);
+    esp_at_port_write_data((uint8_t *)"  data_source: @/path/to/file (SD card) or byte_count (UART)\r\n", 63);
+    esp_at_port_write_data((uint8_t *)"Examples:\r\n", 11);
+    esp_at_port_write_data((uint8_t *)"  AT+BNCERT_FLASH=0x380000,@/certs/certificate.pem\r\n", 52);
+    esp_at_port_write_data((uint8_t *)"  AT+BNCERT_FLASH=0x381000,@/certs/private_key.key\r\n", 52);
+    esp_at_port_write_data((uint8_t *)"  AT+BNCERT_FLASH=0x382000,1024\r\n", 33);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bncert_flash_setup(uint8_t para_num)
+{
+    // This is just an alias for the existing BNFLASH_CERT command
+    return at_bnflash_cert_setup(para_num);
 }
 
 // Web Radio command handlers
@@ -775,8 +846,10 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNSD_FORMAT", at_bnsd_format_test, at_bnsd_format_query, NULL, at_bnsd_format_exe},
     {"+BNWPS", at_bnwps_test, at_bnwps_query, at_bnwps_setup, NULL},
     {"+BNFLASH_CERT", at_bnflash_cert_test, NULL, at_bnflash_cert_setup, NULL},
+    {"+BNCERT_FLASH", at_bncert_flash_test, NULL, at_bncert_flash_setup, NULL},
     {"+BNCERT_LIST", at_bncert_list_test, at_bncert_list_query, NULL, NULL},
     {"+BNCERT_ADDR", at_bncert_addr_test, at_bncert_addr_query, NULL, NULL},
+    {"+BNCERT_CLEAR", at_bncert_clear_test, NULL, at_bncert_clear_setup, NULL},
     {"+BNWEB_RADIO", at_bnweb_radio_test, at_bnweb_radio_query, at_bnweb_radio_setup, NULL},
 };
 

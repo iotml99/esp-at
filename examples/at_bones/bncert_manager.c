@@ -9,6 +9,7 @@
 #include "esp_partition.h"
 #include "esp_log.h"
 #include "esp_tls.h"
+#include "esp_at.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -42,13 +43,10 @@ bool bncert_manager_init(void)
 
     ESP_LOGI(TAG, "Certificate manager initialized with partition at 0x%08X (%u bytes)",
              (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
-    printf("BNCERT_MGR: Certificate manager initialized with partition at 0x%08X (%u bytes)\n",
-           (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
     // Scan partition for existing certificates
     if (!bncert_manager_scan_partition()) {
         ESP_LOGW(TAG, "Certificate partition scan failed, but manager is still functional");
-        printf("BNCERT_MGR: Warning - Certificate partition scan failed\n");
     }
 
     return true;
@@ -97,18 +95,13 @@ bool bncert_manager_scan_partition(void)
             certificates_found++;
             ESP_LOGI(TAG, "Discovered certificate at 0x%08X (%u bytes)", 
                      (unsigned int)addr, (unsigned int)cert_size);
-            printf("BNCERT_MGR: Discovered certificate at 0x%08X (%u bytes)\n", 
-                   (unsigned int)addr, (unsigned int)cert_size);
         } else {
             ESP_LOGW(TAG, "Failed to register discovered certificate at 0x%08X", (unsigned int)addr);
-            printf("BNCERT_MGR: Warning - Failed to register certificate at 0x%08X\n", (unsigned int)addr);
         }
     }
     
     ESP_LOGI(TAG, "Certificate partition scan complete: %u certificates found", 
              (unsigned int)certificates_found);
-    printf("BNCERT_MGR: Certificate partition scan complete - %u certificates found\n", 
-           (unsigned int)certificates_found);
     
     return true;
 }
@@ -263,8 +256,6 @@ bool bncert_manager_register(uint32_t address, size_t size)
             
             ESP_LOGI(TAG, "Registered certificate at 0x%08X (%u bytes)",
                      (unsigned int)address, (unsigned int)size);
-            printf("BNCERT_MGR: Certificate registered at 0x%08X (%u bytes)\n",
-                   (unsigned int)address, (unsigned int)size);
             
             return true;
         }
@@ -298,6 +289,73 @@ bool bncert_manager_unregister(uint32_t address)
     ESP_LOGW(TAG, "Certificate at address 0x%08X not found in registry", 
              (unsigned int)address);
     return false;
+}
+
+bool bncert_manager_clear_cert(uint32_t address)
+{
+    if (!s_cert_registry.initialized) {
+        ESP_LOGE(TAG, "Certificate manager not initialized");
+        return false;
+    }
+
+    if (!s_cert_partition) {
+        ESP_LOGE(TAG, "Certificate partition not available");
+        return false;
+    }
+
+    // Check if address is within partition bounds and 4KB aligned
+    uint32_t partition_start = s_cert_partition->address;
+    uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
+    
+    if (address < partition_start || address >= partition_end) {
+        ESP_LOGE(TAG, "Address 0x%08X outside certificate partition bounds", (unsigned int)address);
+        return false;
+    }
+    
+    if (address % 0x1000 != 0) {
+        ESP_LOGE(TAG, "Address 0x%08X not 4KB aligned", (unsigned int)address);
+        return false;
+    }
+
+    // Unregister from manager first
+    bool was_registered = bncert_manager_unregister(address);
+    
+    // Erase the 4KB sector at this address
+    uint32_t offset = address - partition_start;
+    esp_err_t err = esp_partition_erase_range(s_cert_partition, offset, 0x1000);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase certificate at 0x%08X: %s", 
+                 (unsigned int)address, esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Certificate at 0x%08X cleared (erased 4KB)", (unsigned int)address);
+    
+    // Reload all certificates to update registry
+    bncert_manager_reload_certificates();
+    
+    return true;
+}
+
+void bncert_manager_reload_certificates(void)
+{
+    if (!s_cert_registry.initialized) {
+        ESP_LOGW(TAG, "Certificate manager not initialized");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Reloading all certificates from partition");
+    
+    // Clear current registry but keep initialized flag
+    size_t old_count = s_cert_registry.count;
+    memset(s_cert_registry.certificates, 0, sizeof(s_cert_registry.certificates));
+    s_cert_registry.count = 0;
+    
+    // Rescan partition for certificates
+    bncert_manager_scan_partition();
+    
+    ESP_LOGI(TAG, "Certificate reload complete: %u certificates (was %u)", 
+             (unsigned int)s_cert_registry.count, (unsigned int)old_count);
 }
 
 bool bncert_manager_load_cert(uint32_t address, size_t size, uint8_t **data_out)
@@ -335,8 +393,23 @@ bool bncert_manager_load_cert(uint32_t address, size_t size, uint8_t **data_out)
     *data_out = buffer;
     ESP_LOGI(TAG, "Loaded certificate from 0x%08X (%u bytes)", 
              (unsigned int)address, (unsigned int)size);
-    printf("BNCERT_MGR: Certificate loaded from flash at 0x%08X (%u bytes)\n", 
-           (unsigned int)address, (unsigned int)size);
+    
+    // Print certificate content summary for debugging
+    const char *cert_type = "UNKNOWN";
+    if (size >= 27 && memcmp(buffer, "-----BEGIN CERTIFICATE-----", 27) == 0) {
+        cert_type = "X.509 Certificate";
+    } else if (size >= 28 && memcmp(buffer, "-----BEGIN PRIVATE KEY-----", 28) == 0) {
+        cert_type = "Private Key (PKCS#8)";
+    } else if (size >= 32 && memcmp(buffer, "-----BEGIN RSA PRIVATE KEY-----", 32) == 0) {
+        cert_type = "RSA Private Key";
+    } else if (size >= 31 && memcmp(buffer, "-----BEGIN EC PRIVATE KEY-----", 31) == 0) {
+        cert_type = "EC Private Key";
+    } else if (size >= 4 && buffer[0] == 0x30 && buffer[1] == 0x82) {
+        cert_type = "DER Format";
+    }
+    
+    printf("BNCERT_MGR: Certificate loaded from flash at 0x%08X (%u bytes) - Type: %s\n", 
+           (unsigned int)address, (unsigned int)size, cert_type);
     
     return true;
 }
@@ -477,11 +550,16 @@ void bncert_manager_cleanup_tls(esp_tls_cfg_t *tls_cfg)
 void bncert_manager_list_certificates(void)
 {
     if (!s_cert_registry.initialized) {
-        printf("Certificate manager not initialized\n");
+        esp_at_port_write_data((uint8_t *)"ERROR: Certificate manager not initialized\r\n", 45);
         return;
     }
 
-    printf("+BNCERT_LIST:%u,%u\r\n", (unsigned int)s_cert_registry.count, BNCERT_MAX_CERTIFICATES);
+    char response_buffer[128];
+    int len = snprintf(response_buffer, sizeof(response_buffer),
+                      "+BNCERT_LIST:%u,%u\r\n", 
+                      (unsigned int)s_cert_registry.count, 
+                      BNCERT_MAX_CERTIFICATES);
+    esp_at_port_write_data((uint8_t *)response_buffer, len);
     
     for (size_t i = 0; i < BNCERT_MAX_CERTIFICATES; i++) {
         if (s_cert_registry.certificates[i].in_use) {
@@ -501,10 +579,12 @@ void bncert_manager_list_certificates(void)
                 free(cert_data);
             }
             
-            printf("+BNCERT_ENTRY:0x%08X,%u,\"%s\"\r\n",
-                   (unsigned int)cert->address,
-                   (unsigned int)cert->size,
-                   type_name);
+            len = snprintf(response_buffer, sizeof(response_buffer),
+                          "+BNCERT_ENTRY:0x%08X,%u,\"%s\"\r\n",
+                          (unsigned int)cert->address,
+                          (unsigned int)cert->size,
+                          type_name);
+            esp_at_port_write_data((uint8_t *)response_buffer, len);
         }
     }
 }
@@ -538,15 +618,16 @@ bool bncert_manager_validate_cert(const uint8_t *data, size_t size)
         return false;
     }
 
-    // Basic validation - check for common certificate/key markers
+    // Strict validation - certificate MUST start with proper markers
+    // No garbage characters allowed at the beginning
     
-    // Check for PEM certificate format
-    if (size > 27 && memcmp(data, "-----BEGIN CERTIFICATE-----", 27) == 0) {
+    // Check for PEM certificate format (must start exactly with the marker)
+    if (size >= 27 && memcmp(data, "-----BEGIN CERTIFICATE-----", 27) == 0) {
         ESP_LOGD(TAG, "Detected PEM certificate format");
         return true;
     }
     
-    // Check for PEM private key formats
+    // Check for PEM private key formats (must start exactly with the marker)
     const char *pem_markers[] = {
         "-----BEGIN PRIVATE KEY-----",
         "-----BEGIN RSA PRIVATE KEY-----",
@@ -555,19 +636,32 @@ bool bncert_manager_validate_cert(const uint8_t *data, size_t size)
     
     for (int i = 0; i < 3; i++) {
         size_t marker_len = strlen(pem_markers[i]);
-        if (size > marker_len && memcmp(data, pem_markers[i], marker_len) == 0) {
-            ESP_LOGD(TAG, "Detected PEM private key format");
+        if (size >= marker_len && memcmp(data, pem_markers[i], marker_len) == 0) {
+            ESP_LOGD(TAG, "Detected PEM private key format: %s", pem_markers[i]);
             return true;
         }
     }
     
     // Check for DER format (X.509 certificates start with 0x30)
-    if (size > 4 && data[0] == 0x30 && data[1] == 0x82) {
+    if (size >= 4 && data[0] == 0x30 && data[1] == 0x82) {
         ESP_LOGD(TAG, "Detected DER certificate/key format");
         return true;
     }
 
-    ESP_LOGW(TAG, "Certificate validation failed - unrecognized format");
+    // Log the first few bytes to help with debugging
+    char debug_str[32] = {0};
+    size_t debug_len = size < 15 ? size : 15;
+    for (size_t i = 0; i < debug_len; i++) {
+        if (data[i] >= 32 && data[i] <= 126) {
+            debug_str[i] = data[i];
+        } else {
+            debug_str[i] = '.';
+        }
+    }
+    debug_str[debug_len] = '\0';
+    
+    ESP_LOGW(TAG, "Certificate validation failed - invalid format. First %u bytes: '%s'", 
+             (unsigned int)debug_len, debug_str);
     return false;
 }
 

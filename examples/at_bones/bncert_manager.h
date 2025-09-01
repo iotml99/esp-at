@@ -124,6 +124,25 @@ bool bncert_manager_register(uint32_t address, size_t size);
 bool bncert_manager_unregister(uint32_t address);
 
 /**
+ * @brief Clear (erase) a certificate from flash
+ * 
+ * Erases the 4KB sector at the specified address and removes the
+ * certificate from the registry. Automatically reloads all certificates.
+ * 
+ * @param address Flash address of certificate to clear (must be 4KB aligned)
+ * @return true on success, false on failure
+ */
+bool bncert_manager_clear_cert(uint32_t address);
+
+/**
+ * @brief Reload all certificates from partition
+ * 
+ * Clears the current registry and rescans the partition to discover
+ * all certificates. Useful after adding or removing certificates.
+ */
+void bncert_manager_reload_certificates(void);
+
+/**
  * @brief Load certificate data from partition
  * 
  * Reads certificate data from the certificate partition.

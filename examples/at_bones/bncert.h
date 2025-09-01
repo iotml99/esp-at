@@ -147,6 +147,18 @@ const char* bncert_get_result_string(bncert_result_t result);
  */
 void bncert_list_valid_addresses(void);
 
+/**
+ * @brief Validate certificate data format (from manager)
+ * 
+ * Validates that certificate data is in proper PEM or DER format and
+ * starts with correct markers (no garbage characters allowed).
+ * 
+ * @param data Certificate data to validate
+ * @param size Size of certificate data
+ * @return true if format is valid, false otherwise
+ */
+bool bncert_manager_validate_cert(const uint8_t *data, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

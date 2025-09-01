@@ -14,6 +14,7 @@
 #include "util.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,13 +29,17 @@ static const char *TAG = "BNCERT";
 static bool validate_cert_file_path_prefix(const char *file_path)
 {
     if (!file_path || strlen(file_path) == 0) {
-        printf("ERROR: Empty file path for certificate\n");
+        esp_at_port_write_data((uint8_t *)"ERROR: Empty file path for certificate\r\n", 41);
         return false;
     }
     
     if (file_path[0] != '@') {
         ESP_LOGE(TAG, "Invalid certificate file path: %s (must start with @)", file_path);
-        printf("ERROR: Certificate file path must start with @ (SD card prefix): %s\n", file_path);
+        char error_msg[120];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Certificate file path must start with @ (SD card prefix): %s\r\n", 
+                          file_path);
+        esp_at_port_write_data((uint8_t *)error_msg, len);
         return false;
     }
     
@@ -64,11 +69,9 @@ bool bncert_init(void)
     ESP_LOGI(TAG, "Found certificate partition: address=0x%08X, size=%u bytes", 
              (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
-    // Print valid address information
-    printf("BNCERT: Certificate partition found at 0x%08X (%u bytes)\n", 
+    // Print valid address information (only to debug log, not console)
+    ESP_LOGI(TAG, "Certificate partition found at 0x%08X (%u bytes)", 
            (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
-    
-    bncert_list_valid_addresses();
 
     // Initialize certificate manager for automatic discovery
     if (!bncert_manager_init()) {
@@ -77,7 +80,6 @@ bool bncert_init(void)
 
     s_bncert_initialized = true;
     ESP_LOGI(TAG, "Certificate flashing subsystem initialized");
-    printf("BNCERT: Certificate flashing subsystem initialized successfully\n");
     return true;
 }
 
@@ -105,61 +107,93 @@ uint8_t bncert_parse_params(uint8_t para_num, bncert_params_t *params)
 
     // Need exactly 2 parameters: flash_address and data_source
     if (para_num != 2) {
-        printf("ERROR: AT+BNFLASH_CERT requires exactly 2 parameters: <flash_address>,<data_source>\n");
+        esp_at_port_write_data((uint8_t *)"ERROR: AT+BNCERT_FLASH requires exactly 2 parameters: <flash_address>,<data_source>\r\n", 85);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
     // Parse flash address (parameter 0)
     int32_t addr_value;
     if (esp_at_get_para_as_digit(0, &addr_value) != ESP_AT_PARA_PARSE_RESULT_OK) {
-        printf("ERROR: Invalid flash address parameter\n");
+        esp_at_port_write_data((uint8_t *)"ERROR: Invalid flash address parameter\r\n", 40);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     params->flash_address = (uint32_t)addr_value;
 
-    // Parse data source (parameter 1)
+    // Parse data source (parameter 1) - try digit first, then string
+    int32_t digit_value;
     uint8_t *data_source_str = NULL;
-    if (esp_at_get_para_as_str(1, &data_source_str) != ESP_AT_PARA_PARSE_RESULT_OK) {
-        printf("ERROR: Invalid data source parameter\n");
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    if (data_source_str[0] == '@') {
-        // File source - validate the @ prefix
-        if (!validate_cert_file_path_prefix((char *)data_source_str)) {
+    
+    // Try parsing as digit first (for unquoted numbers like 1674)
+    if (esp_at_get_para_as_digit(1, &digit_value) == ESP_AT_PARA_PARSE_RESULT_OK) {
+        // Successfully parsed as digit - this is UART data source
+        if (digit_value <= 0 || digit_value > BNCERT_MAX_DATA_SIZE) {
+            char error_msg[120];
+            int len = snprintf(error_msg, sizeof(error_msg), 
+                              "ERROR: Invalid data size: %ld bytes (must be 1-%u, max 4KB)\r\n", 
+                              (long)digit_value, BNCERT_MAX_DATA_SIZE);
+            esp_at_port_write_data((uint8_t *)error_msg, len);
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
-        params->source_type = BNCERT_SOURCE_FILE;
-        
-        if (strlen((char *)data_source_str) > BNCERT_MAX_FILE_PATH_LENGTH) {
-            printf("ERROR: File path too long (max %d characters)\n", BNCERT_MAX_FILE_PATH_LENGTH);
-            return ESP_AT_RESULT_CODE_ERROR;
-        }
-        
-        strncpy(params->file_path, (char *)data_source_str, BNCERT_MAX_FILE_PATH_LENGTH);
-        params->file_path[BNCERT_MAX_FILE_PATH_LENGTH] = '\0';
-        
-        // Normalize the file path (remove @ and prepend mount point)
-        normalize_path_with_mount_point(params->file_path, BNCERT_MAX_FILE_PATH_LENGTH);
-        
-        ESP_LOGI(TAG, "Certificate source: file %s", params->file_path);
-    } else {
-        // Check if it's a valid numeric value for UART data source
-        char *endptr;
-        long data_size = strtol((char *)data_source_str, &endptr, 10);
-        
-        if (*endptr != '\0' || data_size < 0 || data_size > BNCERT_MAX_DATA_SIZE) {
-            // Not a valid number and doesn't start with @ - invalid
-            printf("ERROR: Invalid data source: %s (must be numeric 0-%u or file path starting with @)\n", 
-                   (char *)data_source_str, BNCERT_MAX_DATA_SIZE);
-            return ESP_AT_RESULT_CODE_ERROR;
-        }
-        
-        // Valid UART data source
         params->source_type = BNCERT_SOURCE_UART;
-        params->data_size = (size_t)data_size;
+        params->data_size = (size_t)digit_value;
         ESP_LOGI(TAG, "Certificate source: UART (%u bytes)", (unsigned int)params->data_size);
+        
+    } else if (esp_at_get_para_as_str(1, &data_source_str) == ESP_AT_PARA_PARSE_RESULT_OK) {
+        // Parse as string (for quoted file paths like "@/certificate.pem")
+        
+        if (data_source_str == NULL || strlen((char *)data_source_str) == 0) {
+            esp_at_port_write_data((uint8_t *)"ERROR: Empty data source parameter\r\n", 37);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        if (data_source_str[0] == '@') {
+            // File source - validate the @ prefix
+            if (!validate_cert_file_path_prefix((char *)data_source_str)) {
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            params->source_type = BNCERT_SOURCE_FILE;
+            
+            if (strlen((char *)data_source_str) > BNCERT_MAX_FILE_PATH_LENGTH) {
+                char error_msg[80];
+                int len = snprintf(error_msg, sizeof(error_msg), 
+                                  "ERROR: File path too long (max %d characters)\r\n", 
+                                  BNCERT_MAX_FILE_PATH_LENGTH);
+                esp_at_port_write_data((uint8_t *)error_msg, len);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            strncpy(params->file_path, (char *)data_source_str, BNCERT_MAX_FILE_PATH_LENGTH);
+            params->file_path[BNCERT_MAX_FILE_PATH_LENGTH] = '\0';
+            
+            // Normalize the file path (remove @ and prepend mount point)
+            normalize_path_with_mount_point(params->file_path, BNCERT_MAX_FILE_PATH_LENGTH);
+            
+            ESP_LOGI(TAG, "Certificate source: file %s", params->file_path);
+        } else {
+            // Check if it's a quoted numeric string (fallback for quoted numbers)
+            char *endptr;
+            long data_size = strtol((char *)data_source_str, &endptr, 10);
+            
+            if (*endptr != '\0' || data_size <= 0 || data_size > BNCERT_MAX_DATA_SIZE) {
+                // Not a valid number and doesn't start with @ - invalid
+                char error_msg[150];
+                int len = snprintf(error_msg, sizeof(error_msg), 
+                                  "ERROR: Invalid data source '%s' (must be unquoted number 1-%u or quoted file path starting with @)\r\n", 
+                                  (char *)data_source_str, BNCERT_MAX_DATA_SIZE);
+                esp_at_port_write_data((uint8_t *)error_msg, len);
+                return ESP_AT_RESULT_CODE_ERROR;
+            }
+            
+            // Valid quoted UART data source
+            params->source_type = BNCERT_SOURCE_UART;
+            params->data_size = (size_t)data_size;
+            ESP_LOGI(TAG, "Certificate source: UART (%u bytes from quoted string)", (unsigned int)params->data_size);
+        }
+    } else {
+        esp_at_port_write_data((uint8_t *)"ERROR: Failed to parse data source parameter\r\n", 47);
+        return ESP_AT_RESULT_CODE_ERROR;
     }
 
     // Validate flash address
@@ -190,33 +224,57 @@ bool bncert_validate_flash_address(uint32_t address, size_t size)
     // Check 4KB alignment
     if (address % 0x1000 != 0) {
         ESP_LOGE(TAG, "Address 0x%08X not 4KB aligned", (unsigned int)address);
-        printf("ERROR: Address must be 4KB aligned\n");
+        char error_msg[60];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Address must be 4KB aligned\r\n");
+        esp_at_port_write_data((uint8_t *)error_msg, len);
         return false;
     }
 
     // Check if address is within certificate partition bounds
     if (address < partition_start || address >= partition_end) {
         ESP_LOGE(TAG, "Address 0x%08X outside certificate partition bounds", (unsigned int)address);
-        printf("ERROR: Address outside certificate partition\n");
+        char error_msg[80];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Address outside certificate partition\r\n");
+        esp_at_port_write_data((uint8_t *)error_msg, len);
         return false;
     }
 
     // Check that address + size doesn't exceed partition end
     if (address + size > partition_end) {
         ESP_LOGE(TAG, "Certificate data would exceed partition boundary");
-        printf("ERROR: Certificate data exceeds partition boundary\n");
+        char error_msg[80];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Certificate data exceeds partition boundary\r\n");
+        esp_at_port_write_data((uint8_t *)error_msg, len);
         return false;
     }
 
     // Check size is reasonable
     if (size == 0 || size > BNCERT_MAX_DATA_SIZE) {
-        ESP_LOGE(TAG, "Invalid certificate size: %u", (unsigned int)size);
-        printf("ERROR: Invalid certificate size\n");
+        ESP_LOGE(TAG, "Invalid certificate size: %u bytes (must be 1-%u, max 4KB)", 
+                 (unsigned int)size, BNCERT_MAX_DATA_SIZE);
+        char error_msg[80];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Certificate size exceeds 4KB limit\r\n");
+        esp_at_port_write_data((uint8_t *)error_msg, len);
         return false;
     }
 
     ESP_LOGI(TAG, "Address 0x%08X validated for %u bytes", (unsigned int)address, (unsigned int)size);
     return true;
+}
+
+// Static semaphore for UART data synchronization (similar to AT user commands)
+static SemaphoreHandle_t s_bncert_data_sync_sema = NULL;
+
+// Callback function for UART data arrival (similar to at_user_wait_data_cb)
+static void bncert_wait_data_cb(void)
+{
+    if (s_bncert_data_sync_sema) {
+        xSemaphoreGive(s_bncert_data_sync_sema);
+    }
 }
 
 bool bncert_collect_uart_data(bncert_params_t *params)
@@ -226,51 +284,107 @@ bool bncert_collect_uart_data(bncert_params_t *params)
         return false;
     }
 
-    if (params->data_size == 0) {
-        ESP_LOGW(TAG, "Zero bytes requested - nothing to collect");
-        params->collected_size = 0;
-        return true;
-    }
-
-    // Allocate buffer for UART data
-    params->uart_data = malloc(params->data_size);
-    if (!params->uart_data) {
-        ESP_LOGE(TAG, "Failed to allocate %u bytes for UART data", 
-                 (unsigned int)params->data_size);
+    if (params->data_size == 0 || params->data_size > BNCERT_MAX_DATA_SIZE) {
+        ESP_LOGE(TAG, "Invalid data size: %u bytes (must be 1-%u)", 
+                 (unsigned int)params->data_size, BNCERT_MAX_DATA_SIZE);
+        char error_msg[80];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Data size %u exceeds 4KB limit (%u bytes)\r\n", 
+                          (unsigned int)params->data_size, BNCERT_MAX_DATA_SIZE);
+        esp_at_port_write_data((uint8_t *)error_msg, len);
         return false;
     }
 
-    ESP_LOGI(TAG, "Collecting %u bytes from UART", (unsigned int)params->data_size);
+    // Allocate 4KB buffer regardless of requested size for safety
+    params->uart_data = malloc(BNCERT_MAX_DATA_SIZE);
+    if (!params->uart_data) {
+        ESP_LOGE(TAG, "Failed to allocate %u bytes for UART data buffer", BNCERT_MAX_DATA_SIZE);
+        char error_msg[80];
+        int len = snprintf(error_msg, sizeof(error_msg), 
+                          "ERROR: Failed to allocate 4KB buffer for certificate data\r\n");
+        esp_at_port_write_data((uint8_t *)error_msg, len);
+        return false;
+    }
 
-    // Send prompt to indicate ready for data
+    // Clear the entire buffer
+    memset(params->uart_data, 0, BNCERT_MAX_DATA_SIZE);
+
+    ESP_LOGI(TAG, "Collecting %u bytes from UART using AT framework pattern", 
+             (unsigned int)params->data_size);
+
+    // Create semaphore for data synchronization (like AT user commands)
+    s_bncert_data_sync_sema = xSemaphoreCreateBinary();
+    if (!s_bncert_data_sync_sema) {
+        ESP_LOGE(TAG, "Failed to create data synchronization semaphore");
+        free(params->uart_data);
+        params->uart_data = NULL;
+        return false;
+    }
+
+    // Enter specific mode with our callback (like AT user commands do)
+    esp_at_port_enter_specific(bncert_wait_data_cb);
+    
+    // Send just the ">" prompt manually (since there's no prompt-only result code)
     const char *prompt = ">";
     esp_at_port_write_data((uint8_t *)prompt, strlen(prompt));
 
-    // Collect data from UART
-    size_t bytes_received = 0;
+    // Collect data using the AT framework pattern
+    int32_t bytes_received = 0;
     uint32_t timeout_ms = 30000; // 30 second timeout
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
     
-    while (bytes_received < params->data_size) {
-        uint8_t byte;
-        int32_t len = esp_at_port_read_data(&byte, 1);
-        
-        if (len > 0) {
-            params->uart_data[bytes_received] = byte;
-            bytes_received++;
-        } else {
-            // Yield to other tasks and continue waiting
-            vTaskDelay(pdMS_TO_TICKS(10));
+    // Use semaphore-based waiting like the AT user commands
+    while (bytes_received < (int32_t)params->data_size) {
+        // Wait for data arrival signal (with timeout)
+        if (xSemaphoreTake(s_bncert_data_sync_sema, timeout_ticks) == pdTRUE) {
+            // Data is available, read it
+            int32_t remaining = (int32_t)params->data_size - bytes_received;
+            int32_t len = esp_at_port_read_data(params->uart_data + bytes_received, remaining);
             
-            // In a real implementation, you would implement proper timeout handling here
-            // For now, we rely on the AT command timeout mechanism
+            if (len > 0) {
+                bytes_received += len;
+                ESP_LOGD(TAG, "Read %ld bytes, total: %ld/%u", 
+                         (long)len, (long)bytes_received, (unsigned int)params->data_size);
+                
+                // Show progress every 256 bytes
+                if (bytes_received % 256 == 0) {
+                    ESP_LOGI(TAG, "Received %ld/%u bytes", (long)bytes_received, (unsigned int)params->data_size);
+                }
+            }
+        } else {
+            // Timeout waiting for data
+            ESP_LOGE(TAG, "Timeout waiting for certificate data - received %ld/%u bytes", 
+                     (long)bytes_received, (unsigned int)params->data_size);
+            break;
         }
     }
 
-    params->collected_size = bytes_received;
-    ESP_LOGI(TAG, "Successfully collected %u bytes from UART", 
-             (unsigned int)params->collected_size);
+    // Exit specific mode (like AT user commands do)
+    esp_at_port_exit_specific();
 
-    return true;
+    // Clean up semaphore
+    vSemaphoreDelete(s_bncert_data_sync_sema);
+    s_bncert_data_sync_sema = NULL;
+
+    params->collected_size = (size_t)bytes_received;
+    
+    // Check for remaining data (this is what causes "busy p..." in AT framework)
+    int32_t remaining_data = esp_at_port_get_data_length();
+    if (remaining_data > 0) {
+        ESP_LOGW(TAG, "Warning: %ld bytes remain in AT buffer (will cause busy message)", 
+                 (long)remaining_data);
+        // The AT framework will handle this and send "busy p..." automatically
+    }
+    
+    if (bytes_received == (int32_t)params->data_size) {
+        ESP_LOGI(TAG, "Successfully collected %u bytes from UART using AT framework", 
+                 (unsigned int)params->collected_size);
+        return true;
+    } else {
+        ESP_LOGW(TAG, "Partial data collection: %ld/%u bytes received", 
+                 (long)bytes_received, (unsigned int)params->data_size);
+        return false;
+    }
 }
 
 bncert_result_t bncert_flash_certificate(bncert_params_t *params)
@@ -312,7 +426,13 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
 
         long file_size = file_stat.st_size;
         if (file_size <= 0 || file_size > BNCERT_MAX_DATA_SIZE) {
-            ESP_LOGE(TAG, "Invalid certificate file size: %ld bytes", file_size);
+            ESP_LOGE(TAG, "Invalid certificate file size: %ld bytes (must be 1-%u, max 4KB)", 
+                     file_size, BNCERT_MAX_DATA_SIZE);
+            char error_msg[100];
+            int len = snprintf(error_msg, sizeof(error_msg), 
+                              "ERROR: Certificate file size %ld bytes exceeds 4KB limit\r\n", 
+                              file_size);
+            esp_at_port_write_data((uint8_t *)error_msg, len);
             close(fd);
             return BNCERT_RESULT_FILE_ERROR;
         }
@@ -341,8 +461,13 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
 
         ESP_LOGI(TAG, "Successfully read %u bytes from certificate file", 
                  (unsigned int)data_size);
-        printf("BNCERT: Successfully loaded certificate from file: %s (%u bytes)\n", 
-               params->file_path, (unsigned int)data_size);
+
+        // Validate certificate format before flashing
+        if (!bncert_manager_validate_cert(data_buffer, data_size)) {
+            ESP_LOGE(TAG, "Certificate file validation failed: %s", params->file_path);
+            free(data_buffer);
+            return BNCERT_RESULT_FILE_ERROR;
+        }
 
     } else {
         // Use UART data
@@ -351,6 +476,12 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
 
         if (!data_buffer || data_size == 0) {
             ESP_LOGE(TAG, "No UART data available for flashing");
+            return BNCERT_RESULT_UART_ERROR;
+        }
+
+        // Validate certificate format before flashing
+        if (!bncert_manager_validate_cert(data_buffer, data_size)) {
+            ESP_LOGE(TAG, "UART certificate data validation failed");
             return BNCERT_RESULT_UART_ERROR;
         }
 
@@ -412,17 +543,16 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
     if (result == BNCERT_RESULT_OK) {
         ESP_LOGI(TAG, "Certificate successfully flashed to 0x%08X (%u bytes)", 
                  (unsigned int)params->flash_address, (unsigned int)data_size);
-        printf("BNCERT: Certificate successfully saved to flash at 0x%08X (%u bytes)\n", 
-               (unsigned int)params->flash_address, (unsigned int)data_size);
         
         // Automatically register the certificate with the manager
         if (bncert_manager_register(params->flash_address, data_size)) {
             ESP_LOGI(TAG, "Certificate automatically registered with manager");
-            printf("BNCERT: Certificate automatically registered for TLS use\n");
         } else {
             ESP_LOGW(TAG, "Failed to register certificate with manager (flash was successful)");
-            printf("BNCERT: Warning - Certificate saved but failed to register for automatic TLS use\n");
         }
+        
+        // Reload all certificates to ensure registry is up to date
+        bncert_manager_reload_certificates();
     }
 
 cleanup:
@@ -471,7 +601,7 @@ const char* bncert_get_result_string(bncert_result_t result)
 void bncert_list_valid_addresses(void)
 {
     if (!s_cert_partition) {
-        printf("BNCERT: Certificate partition not initialized\n");
+        esp_at_port_write_data((uint8_t *)"ERROR: Certificate partition not initialized\r\n", 47);
         return;
     }
 
@@ -479,41 +609,56 @@ void bncert_list_valid_addresses(void)
     uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
     uint32_t partition_size = s_cert_partition->size;
     
-    printf("BNCERT: Valid certificate storage addresses (4KB aligned):\n");
-    printf("BNCERT: Partition range: 0x%08X - 0x%08X (%u bytes)\n", 
-           (unsigned int)partition_start, (unsigned int)(partition_end - 1), (unsigned int)partition_size);
-    printf("BNCERT: Available 4KB-aligned addresses:\n");
+    char response_buffer[256];
     
-    // List all valid 4KB aligned addresses
+    // Send partition information
+    int len = snprintf(response_buffer, sizeof(response_buffer),
+                      "+BNCERT_ADDR:PARTITION,0x%08X,0x%08X,%u\r\n",
+                      (unsigned int)partition_start,
+                      (unsigned int)(partition_end - 1),
+                      (unsigned int)partition_size);
+    esp_at_port_write_data((uint8_t *)response_buffer, len);
+    
+    // Send capacity information
+    uint32_t total_slots = (partition_end - partition_start) / 0x1000;
+    len = snprintf(response_buffer, sizeof(response_buffer),
+                  "+BNCERT_ADDR:CAPACITY,%u,4096,%u\r\n",
+                  (unsigned int)total_slots,
+                  (unsigned int)(partition_size / 1024));
+    esp_at_port_write_data((uint8_t *)response_buffer, len);
+    
+    // Send valid addresses in groups of 4
+    esp_at_port_write_data((uint8_t *)"+BNCERT_ADDR:ADDRESSES\r\n", 24);
+    
     int count = 0;
     for (uint32_t addr = partition_start; addr < partition_end; addr += 0x1000) {
         if (count % 4 == 0) {
-            printf("BNCERT:   ");
+            if (count > 0) {
+                esp_at_port_write_data((uint8_t *)"\r\n", 2);
+            }
+            len = snprintf(response_buffer, sizeof(response_buffer),
+                          "+BNCERT_ADDR:0x%08X", (unsigned int)addr);
+            esp_at_port_write_data((uint8_t *)response_buffer, len);
+        } else {
+            len = snprintf(response_buffer, sizeof(response_buffer),
+                          ",0x%08X", (unsigned int)addr);
+            esp_at_port_write_data((uint8_t *)response_buffer, len);
         }
-        printf("0x%08X", (unsigned int)addr);
         count++;
         
-        if (count % 4 == 0) {
-            printf("\n");
-        } else {
-            printf("  ");
-        }
-        
-        // Stop at reasonable number to avoid console spam
-        if (count >= 64) {
-            printf("\nBNCERT:   ... (total %u valid addresses)\n", 
-                   (unsigned int)((partition_end - partition_start) / 0x1000));
+        // Limit output to avoid flooding
+        if (count >= 16) {
+            len = snprintf(response_buffer, sizeof(response_buffer),
+                          "\r\n+BNCERT_ADDR:TOTAL,%u\r\n", (unsigned int)total_slots);
+            esp_at_port_write_data((uint8_t *)response_buffer, len);
             break;
         }
     }
     
-    if (count % 4 != 0) {
-        printf("\n");
+    if (count < 16 && count % 4 != 0) {
+        esp_at_port_write_data((uint8_t *)"\r\n", 2);
     }
     
-    printf("BNCERT: Total capacity: %u slots (4KB each = %u KB total)\n", 
-           (unsigned int)((partition_end - partition_start) / 0x1000),
-           (unsigned int)(partition_size / 1024));
-    printf("BNCERT: Address alignment: All addresses must be 4KB (0x1000) aligned\n");
-    printf("BNCERT: Usage: AT+BNFLASH_CERT=<address>,<@file_path_or_byte_count>\n");
+    // Send usage information
+    esp_at_port_write_data((uint8_t *)"+BNCERT_ADDR:USAGE,\"AT+BNFLASH_CERT=<address>,<@file_or_bytes>\"\r\n", 64);
 }
