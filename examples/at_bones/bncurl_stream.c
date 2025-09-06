@@ -35,6 +35,7 @@ void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_c
     stream_ctx->output_fd = -1;
     stream_ctx->file_path = NULL;
     stream_ctx->is_range_request = is_range_request;
+    stream_ctx->deferred_flush_bytes = 0;
     
     // Check if we have a download file path
     if (ctx && strlen(ctx->params.data_download) > 0) {
@@ -81,17 +82,21 @@ void bncurl_stream_init_with_range(bncurl_stream_context_t *stream_ctx, bncurl_c
     // Note: Removed UART range info message as it's not needed
     
     
-    // Initialize buffers
+    // Initialize buffers (now static, no allocation needed)
     for (int i = 0; i < BNCURL_STREAM_BUFFER_COUNT; i++) {
         stream_ctx->buffers[i].size = 0;
         stream_ctx->buffers[i].is_full = false;
         stream_ctx->buffers[i].is_streaming = false;
     }
     
-    ESP_LOGI(TAG, "Stream context initialized with %d buffers of %d bytes each, output: %s (%s mode)", 
-             BNCURL_STREAM_BUFFER_COUNT, BNCURL_STREAM_BUFFER_SIZE,
+    ESP_LOGI(TAG, "Stream context initialized with %d buffers of %d KB each, output: %s (%s mode)", 
+             BNCURL_STREAM_BUFFER_COUNT, BNCURL_STREAM_BUFFER_SIZE / 1024,
              stream_ctx->file_path ? stream_ctx->file_path : "UART",
              is_range_request ? "append" : "write");
+             
+    // Log memory usage
+    ESP_LOGI(TAG, "Allocated %d KB total for streaming buffers", 
+             (BNCURL_STREAM_BUFFER_COUNT * BNCURL_STREAM_BUFFER_SIZE) / 1024);
 }
 
 bool bncurl_stream_buffer_to_output(bncurl_stream_context_t *stream_ctx, int buffer_index)
@@ -118,10 +123,18 @@ bool bncurl_stream_buffer_to_output(bncurl_stream_context_t *stream_ctx, int buf
         // Write to file using POSIX write
         ssize_t written = write(stream_ctx->output_fd, buffer->data, buffer->size);
         if (written == (ssize_t)buffer->size) {
-            // Force data to be written to disk (equivalent to fflush + fsync)
-            fsync(stream_ctx->output_fd);
+            stream_ctx->deferred_flush_bytes += buffer->size;
+            
+            // Defer fsync: only sync every 256KB or at end (huge performance gain!)
+            if (stream_ctx->deferred_flush_bytes >= BNCURL_FSYNC_INTERVAL) {
+                fsync(stream_ctx->output_fd);
+                stream_ctx->deferred_flush_bytes = 0;
+                ESP_LOGD(TAG, "Periodic fsync at %u total bytes", (unsigned)stream_ctx->bytes_streamed);
+            }
+            
             success = true;
-            ESP_LOGI(TAG, "Wrote %u bytes to file: %s", (unsigned int)buffer->size, stream_ctx->file_path);
+            ESP_LOGD(TAG, "Wrote %u bytes (deferred: %u)", 
+                     (unsigned)buffer->size, (unsigned)stream_ctx->deferred_flush_bytes);
         } else {
             ESP_LOGE(TAG, "Failed to write to file: %s (wrote %d of %u bytes, errno: %d)", 
                      stream_ctx->file_path, (int)written, (unsigned int)buffer->size, errno);
@@ -136,13 +149,13 @@ bool bncurl_stream_buffer_to_output(bncurl_stream_context_t *stream_ctx, int buf
         // Send the actual data
         esp_at_port_write_data((uint8_t *)buffer->data, buffer->size);
         success = true;
-        ESP_LOGI(TAG, "Streamed buffer %d to UART: %u bytes", buffer_index, (unsigned int)buffer->size);
+        // ESP_LOGI(TAG, "Streamed buffer %d to UART: %u bytes", buffer_index, (unsigned int)buffer->size);
     }
     
     if (success) {
         // Update streaming statistics
         stream_ctx->bytes_streamed += buffer->size;
-        ESP_LOGI(TAG, "Total bytes streamed: %u", (unsigned int)stream_ctx->bytes_streamed);
+        // ESP_LOGI(TAG, "Total bytes streamed: %u", (unsigned int)stream_ctx->bytes_streamed);
     }
     
     // Reset buffer for reuse
@@ -162,6 +175,12 @@ void bncurl_stream_finalize(bncurl_stream_context_t *stream_ctx, bool success)
     
     // Close file if it was opened
     if (stream_ctx->output_fd >= 0) {
+        // Final flush of any pending data
+        if (stream_ctx->deferred_flush_bytes > 0) {
+            fsync(stream_ctx->output_fd);
+            ESP_LOGI(TAG, "Final fsync: %u bytes", (unsigned)stream_ctx->deferred_flush_bytes);
+        }
+        
         // Get final file size before closing
         struct stat file_stat;
         long final_size = -1;

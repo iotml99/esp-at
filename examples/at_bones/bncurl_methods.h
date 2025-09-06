@@ -11,13 +11,18 @@
 #include <stdio.h>
 #include "bncurl.h"
 
-// Buffer configuration for dual-buffer streaming
-#define BNCURL_STREAM_BUFFER_SIZE   512   // 512 bytes per buffer (or lower as requested)
-#define BNCURL_STREAM_BUFFER_COUNT  2     // Two buffers for ping-pong
+#include "bncurl_config.h"
+
+// Deferred fsync interval for performance optimization
+#define BNCURL_FSYNC_INTERVAL (128 * 1024)  // 128KB (reduced for better data safety)
+
+// Buffer structure for dual-buffer streaming
+#define BNCURL_STREAM_BUFFER_SIZE   (6 * 1024)   // 6KB per buffer (12KB total, safe with 24KB stack)
+#define BNCURL_STREAM_BUFFER_COUNT  2             // Two buffers for ping-pong
 
 // Streaming buffer structure
 typedef struct {
-    char data[BNCURL_STREAM_BUFFER_SIZE];
+    char data[BNCURL_STREAM_BUFFER_SIZE];  // Back to static allocation for performance
     size_t size;
     bool is_full;
     bool is_streaming;
@@ -33,6 +38,7 @@ typedef struct {
     int output_fd;          // File descriptor for download (-1 for UART output)
     char *file_path;        // Path to output file (NULL for UART output)
     bool is_range_request;  // True if this is a range request
+    size_t deferred_flush_bytes; // Bytes accumulated since last fsync
 } bncurl_stream_context_t;
 
 /**

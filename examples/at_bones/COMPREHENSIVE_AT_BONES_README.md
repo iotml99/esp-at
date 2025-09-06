@@ -1,7 +1,7 @@
 # ESP32 AT Bones - Comprehensive Developer Guide
 
-**Version:** 2.0  
-**Date:** August 31, 2025  
+**Version:** 2.1  
+**Date:** September 1, 2025  
 **Framework:** ESP-AT with Custom Extensions  
 
 ## 📋 Table of Contents
@@ -23,17 +23,17 @@
 
 ## Overview
 
-The AT Bones framework is a comprehensive ESP32 AT command extension that provides advanced HTTP/HTTPS capabilities, SD card management, WiFi setup automation, certificate handling, and web radio streaming. Built on top of ESP-AT, it extends the standard AT command set with powerful networking and storage features.
+The AT Bones framework is a comprehensive ESP32 AT command extension that provides HTTP/HTTPS capabilities, SD card management, WiFi setup automation, certificate handling, and web radio streaming. Built on top of ESP-AT, it extends the standard AT command set with networking and storage features.
 
 ### Key Features
 
-- **Advanced HTTP/HTTPS Client** - Full-featured HTTP client with range downloads, cookies, custom headers
-- **Certificate Management** - Dynamic certificate flashing and automatic type detection  
+- **HTTP/HTTPS Client** - Supports GET, POST, and HEAD methods with options-based syntax
+- **Certificate Management** - Dynamic certificate flashing and automatic integration  
 - **SD Card Operations** - Mount, format, space management with FAT32 support
 - **WiFi Protected Setup** - Automated WPS connection with timeout controls
 - **Web Radio Streaming** - Continuous audio streaming with real-time UART output
-- **Range Downloads** - Efficient partial content downloads with resume capability
-- **Cookie Support** - Persistent cookie storage and management
+- **Range Downloads** - Efficient partial content downloads with UART streaming
+- **Cookie Support** - Automatic cookie handling for session management
 - **HTTPS Integration** - Seamless certificate integration with fallback strategies
 
 ### Prerequisites
@@ -46,162 +46,138 @@ The AT Bones framework is a comprehensive ESP32 AT command extension that provid
 
 ---
 
-## Architecture
-
-### Component Structure
-
-```
-at_bones/
-├── Core Framework
-│   ├── at_bones.c           # Main AT command registration
-│   ├── util.c/h             # Utility functions
-│   └── CMakeLists.txt       # Build configuration
-├── HTTP/HTTPS (BNCURL)
-│   ├── bncurl.c/h           # Main BNCURL interface
-│   ├── bncurl_common.c/h    # Common HTTP functionality
-│   ├── bncurl_executor.c/h  # Command execution engine
-│   ├── bncurl_params.c/h    # Parameter handling
-│   ├── bncurl_get.c/h       # GET method implementation
-│   ├── bncurl_post.c/h      # POST method implementation
-│   ├── bncurl_head.c/h      # HEAD method implementation
-│   ├── bncurl_stream.c      # Streaming functionality
-│   ├── bncurl_cookies.c/h   # Cookie management
-│   └── bncurl_config.h      # Configuration constants
-├── Storage Management
-│   └── at_sd.c/h            # SD card operations
-├── WiFi Setup
-│   └── bnwps.c/h            # WPS functionality
-├── Certificate Management
-│   ├── bncert.c/h           # Certificate flashing
-│   └── bncert_manager.c/h   # Certificate management
-├── Audio Streaming
-│   └── bnwebradio.c/h       # Web radio streaming
-└── Documentation
-    ├── COMPREHENSIVE_AT_BONES_README.md
-    ├── BNCERT_HTTPS_TESTING_GUIDE.md
-    ├── COOKIE_TESTING_GUIDE.md
-    ├── RANGE_DOWNLOAD_GUIDE.md
-    └── WEBRADIO_README.md
-```
-
-### Memory Layout
-
-| Component | RAM Usage | Flash Usage | Notes |
-|-----------|-----------|-------------|-------|
-| BNCURL Core | 16KB | 45KB | Basic HTTP functionality |
-| Certificate Manager | 8KB | 12KB | Certificate storage and validation |
-| SD Card Driver | 4KB | 8KB | FAT32 filesystem support |
-| WPS Module | 2KB | 6KB | WiFi setup automation |
-| Web Radio | 12KB | 15KB | Audio streaming (during operation) |
-| **Total** | **42KB** | **86KB** | **Approximate values** |
-
----
-
 ## HTTP/HTTPS Commands (BNCURL)
 
 ### AT+BNCURL - HTTP Request Execution
 
-The main HTTP/HTTPS client command with support for all major HTTP methods.
+The main HTTP/HTTPS client command with support for GET, POST, and HEAD methods using option-based syntax.
 
 #### Command Syntax
 
 ```
-AT+BNCURL=<method>,<url>[,<headers>][,<redirect>][,<timeout>][,<range>][,<data_flag>][,<upload_size>]
+AT+BNCURL=<method>,<url>[,<options>]
 ```
 
 #### Parameters
 
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|
-| `method` | String | GET/POST/PUT/DELETE/HEAD/PATCH | HTTP method |
-| `url` | String | 1-2048 chars | Target URL (HTTP/HTTPS) |
-| `headers` | String | 0-4096 chars | Custom headers (optional) |
-| `redirect` | Integer | 0-10 | Max redirects (default: 5) |
-| `timeout` | Integer | 1-300 | Timeout in seconds (default: 30) |
-| `range` | String | Format: "start-end" | Byte range (optional) |
-| `data_flag` | String | -dd/-du | Data direction flag |
-| `upload_size` | Integer | 1-1048576 | Upload data size for POST/PUT |
+| `method` | String | GET/POST/HEAD | HTTP method (only these 3 supported) |
+| `url` | String | 1-1024 chars | Target URL (HTTP/HTTPS) |
+| `options` | String | Various flags | Optional parameters (see below) |
+
+#### Supported Options
+
+| Option | Syntax | Description |
+|--------|--------|-------------|
+| `-H` | `-H "Header: Value"` | Custom HTTP header |
+| `-du` | `-du <bytes>` or `-du @file` | Upload data (POST only) |
+| `-dd` | `-dd @file` | Download to SD card file |
+| `-c` | `-c @file` | Save cookies to SD card file |
+| `-b` | `-b @file` | Send cookies from SD card file |
+| `-r` | `-r "start-end"` | Range request (GET only, optional with -dd) |
+| `-v` | `-v` | Verbose debug output |
 
 #### Response Format
 
 **Success Response:**
 ```
 OK
-+LEN:<content_length>
-+SEND:<data_chunk>
-...
-SEND OK
 ```
 
 **Error Response:**
 ```
-+HTTP_CODE:<status_code>
-+ERROR:<error_message>
 ERROR
 ```
+
+**Note:** Actual HTTP response data and progress are handled asynchronously through the executor system. Use `AT+BNCURL_PROG?` to monitor progress and `AT+BNCURL?` to check status.
 
 #### Usage Examples
 
 **1. Simple GET Request**
 ```
-AT+BNCURL=GET,"https://httpbin.org/get"
+AT+BNCURL="GET","https://httpbin.org/get"
 OK
-+LEN:326
-+SEND:{"args":{},"headers":{"Accept":"*/*","Host":"httpbin.org"},"origin":"1.2.3.4","url":"https://httpbin.org/get"}
-SEND OK
 ```
 
-**2. POST with JSON Data**
+**2. POST with UART Data Input**
 ```
-AT+BNCURL=POST,"https://httpbin.org/post","Content-Type: application/json",5,30,,-du,25
+AT+BNCURL="POST","https://httpbin.org/post","-du","25"
 OK
-> {"key":"value","test":123}
-+LEN:489
-+SEND:{"args":{},"data":"{\"key\":\"value\",\"test\":123}","headers":{"Content-Type":"application/json"},"json":{"key":"value","test":123},"origin":"1.2.3.4","url":"https://httpbin.org/post"}
-SEND OK
+>{"key":"value","test":123}
 ```
 
-**3. Range Download**
+**3. Range Download to SD Card**
 ```
-AT+BNCURL=GET,"https://httpbin.org/bytes/1000","",5,30,"0-499",-dd
+AT+BNCURL="GET","https://example.com/file.mp3","-dd","@file.mp3","-r","0-2097151"
 OK
-+LEN:500
-+SEND:<500 bytes of data>
-SEND OK
 ```
 
-**4. Custom Headers**
+**4. Range Download to UART (streaming)**
 ```
-AT+BNCURL=GET,"https://httpbin.org/headers","User-Agent: MyApp/1.0\r\nX-Custom-Header: test"
+AT+BNCURL="GET","https://example.com/file.mp3","-r","0-2097151"
 OK
-+LEN:234
-+SEND:{"headers":{"Accept":"*/*","Host":"httpbin.org","User-Agent":"MyApp/1.0","X-Custom-Header":"test"}}
-SEND OK
+```
+
+**5. Custom Headers**
+```
+AT+BNCURL="GET","https://httpbin.org/headers","-H","User-Agent: MyApp/1.0","-H","X-Custom-Header: test"
+OK
+```
+
+**6. Upload from SD Card File**
+```
+AT+BNCURL="POST","https://httpbin.org/post","-du","@data.json"
+OK
+```
+
+### AT+BNCURL? - Query BNCURL Status
+
+Queries the current status of the BNCURL executor.
+
+#### Command Syntax
+
+```
+AT+BNCURL?                   # Query executor status
+```
+
+#### Response Format
+
+```
++BNCURL:<status>
+```
+
+Where `<status>` can be:
+- `IDLE` - No operations in progress
+- `QUEUED` - Operation is queued for execution  
+- `EXECUTING` - Operation is currently executing
+- `UNKNOWN` - Unknown status
+
+#### Example
+
+```
+AT+BNCURL?
++BNCURL:IDLE
+OK
 ```
 
 ### AT+BNCURL_TIMEOUT - Server Response Timeout Configuration
 
-Controls the server response timeout for HTTP operations. This is **NOT** a total download timeout, but a server inactivity timeout. If no data is received from the server for the specified duration, the connection will be closed and an error returned.
+Controls the server response timeout for HTTP operations.
 
 #### Command Syntax
 
 ```
 AT+BNCURL_TIMEOUT=<timeout>  # Set server response timeout
 AT+BNCURL_TIMEOUT?           # Query current timeout
-AT+BNCURL_TIMEOUT=?          # Test command
+AT+BNCURL_TIMEOUT=?          # Test command (shows range)
 ```
 
 #### Parameters
 
 | Parameter | Type | Range | Default | Description |
 |-----------|------|-------|---------|-------------|
-| `timeout` | Integer | 1-120 | 30 | Server response timeout in seconds |
-
-#### Behavior
-
-- **Server Response Timeout**: If no data is received from server for `timeout` seconds, abort
-- **Total Operation Timeout**: Set to `timeout × 10` as safety net for very large downloads
-- **Connection Timeout**: Separate 30-second timeout for initial connection establishment
+| `timeout` | Integer | See config | 30 | Server response timeout in seconds |
 
 #### Examples
 
@@ -211,6 +187,12 @@ OK
 
 AT+BNCURL_TIMEOUT?
 +BNCURL_TIMEOUT:60
+OK
+
+AT+BNCURL_TIMEOUT=?
+AT+BNCURL_TIMEOUT=<timeout>
+Set timeout for server reaction in seconds.
+Range: <min>-<max> seconds
 OK
 ```
 
@@ -223,6 +205,16 @@ Cancels any ongoing HTTP operation.
 ```
 AT+BNCURL_STOP?              # Stop current operation
 ```
+
+#### Response Format
+
+```
++BNCURL_STOP:<result>
+```
+
+Where `<result>` is:
+- `1` - Operation stopped successfully
+- `0` - No operation to stop or stop failed
 
 #### Example
 
@@ -246,14 +238,14 @@ AT+BNCURL_PROG?              # Query progress
 #### Response Format
 
 ```
-+BNCURL_PROG:<bytes_downloaded>,<total_bytes>,<percentage>
++BNCURL_PROG:<bytes_transferred>/<total_bytes>
 ```
 
 #### Example
 
 ```
 AT+BNCURL_PROG?
-+BNCURL_PROG:524288,1048576,50
++BNCURL_PROG:524288/1048576
 OK
 ```
 
@@ -327,13 +319,14 @@ Comprehensive SD card management with FAT32 filesystem support.
 
 ### AT+BNSD_MOUNT - Mount SD Card
 
-Mounts SD card with specified filesystem.
+Mounts SD card with specified mount point.
 
 #### Command Syntax
 
 ```
-AT+BNSD_MOUNT=<mount_path>   # Mount at path
-AT+BNSD_MOUNT?               # Query mount status
+AT+BNSD_MOUNT=<mount_point>  # Mount at specific path
+AT+BNSD_MOUNT                # Mount at default path (/sdcard)
+AT+BNSD_MOUNT?               # Query mount status  
 AT+BNSD_MOUNT=?              # Test command
 ```
 
@@ -341,7 +334,18 @@ AT+BNSD_MOUNT=?              # Test command
 
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|
-| `mount_path` | String | 1-64 chars | Mount point path (e.g., "/sdcard") |
+| `mount_point` | String | 1-64 chars | Mount point path (optional) |
+
+#### Response Format
+
+**Query Response:**
+```
++BNSD_MOUNT:<status>[,"<mount_point>"]
+```
+
+Where:
+- `<status>`: `1` if mounted, `0` if not mounted
+- `<mount_point>`: Mount path (when mounted)
 
 #### Examples
 
@@ -349,8 +353,11 @@ AT+BNSD_MOUNT=?              # Test command
 AT+BNSD_MOUNT="/sdcard"
 OK
 
+AT+BNSD_MOUNT
+OK
+
 AT+BNSD_MOUNT?
-+BNSD_MOUNT:"/sdcard",1
++BNSD_MOUNT:1,"/sdcard"
 OK
 ```
 
@@ -362,8 +369,18 @@ Safely unmounts the SD card filesystem.
 
 ```
 AT+BNSD_UNMOUNT              # Unmount current SD card
-AT+BNSD_UNMOUNT?             # Query unmount status
+AT+BNSD_UNMOUNT?             # Query unmount status  
+AT+BNSD_UNMOUNT=?            # Test command
 ```
+
+#### Response Format
+
+**Query Response:**
+```
++BNSD_UNMOUNT:<status>
+```
+
+Where `<status>` represents the SD card status.
 
 #### Example
 
@@ -384,19 +401,25 @@ Queries available disk space on mounted SD card.
 
 ```
 AT+BNSD_SPACE?               # Query disk space
+AT+BNSD_SPACE=?              # Test command
 ```
 
 #### Response Format
 
 ```
-+BNSD_SPACE:<total_bytes>,<free_bytes>,<used_bytes>
++BNSD_SPACE:<total_bytes>/<used_bytes>
+```
+
+Or on error:
+```
++BNSD_SPACE:ERROR
 ```
 
 #### Example
 
 ```
 AT+BNSD_SPACE?
-+BNSD_SPACE:8056832000,7234567890,822264110
++BNSD_SPACE:8056832000/822264110
 OK
 ```
 
@@ -409,22 +432,34 @@ Formats SD card with FAT32 filesystem.
 ```
 AT+BNSD_FORMAT               # Format with default settings
 AT+BNSD_FORMAT?              # Query format capability
+AT+BNSD_FORMAT=?             # Test command
 ```
+
+#### Response Format
+
+**Query Response:**
+```
++BNSD_FORMAT:<status>
+```
+
+Where `<status>` can be:
+- `READY` - SD card is mounted and ready for formatting
+- `NO_CARD` - No SD card detected
 
 #### Example
 
 ```
+AT+BNSD_FORMAT?
++BNSD_FORMAT:READY
+OK
+
 AT+BNSD_FORMAT
-+BNSD_FORMAT:FORMATTING...
 OK
 ```
 
 ### SD Card Configuration
 
-#### Supported Filesystems
-- **FAT32** - Primary filesystem (recommended)
-- **FAT16** - Legacy support for smaller cards
-- **exFAT** - For cards >32GB (if enabled in menuconfig)
+FAT32 formatted
 
 #### Hardware Requirements
 - **SPI Interface** - 4-wire SPI connection to ESP32
@@ -433,13 +468,10 @@ OK
 - **Voltage** - 3.3V operation
 
 #### Pin Configuration (Default SPI)
-| SD Pin | ESP32 Pin | Function |
-|--------|-----------|----------|
-| CLK | GPIO18 | SPI Clock |
-| CMD | GPIO19 | SPI MOSI |
-| DAT0 | GPIO23 | SPI MISO |
-| DAT3 | GPIO5 | SPI CS |
-
+#define PIN_NUM_CS    18
+#define PIN_NUM_MOSI  19
+#define PIN_NUM_CLK   21
+#define PIN_NUM_MISO  20
 ---
 
 ## WiFi Protected Setup (BNWPS)
@@ -453,39 +485,46 @@ Initiates or queries WPS connection process.
 #### Command Syntax
 
 ```
-AT+BNWPS=<duration>          # Start WPS for duration seconds
-AT+BNWPS=0                   # Query WPS status
+AT+BNWPS=<timeout>           # Start WPS for timeout seconds (1-300) or cancel (0)
 AT+BNWPS?                    # Query current WPS state
-AT+BNWPS=?                   # Test command
+AT+BNWPS=?                   # Test command (show help)
 ```
 
 #### Parameters
 
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|
-| `duration` | Integer | 0, 30-300 | WPS timeout (0=query, 30-300=activate) |
+| `timeout` | Integer | 0, 1-300 | WPS timeout in seconds (0=cancel) |
 
 #### Response Format
 
-**Status Query (duration=0):**
+**Status Query:**
 ```
-+BNWPS:<state>,<elapsed_time>
++BNWPS:<state>
 ```
 
-**WPS States:**
-- `0` - WPS_IDLE
-- `1` - WPS_SCANNING  
-- `2` - WPS_ACTIVE
-- `3` - WPS_SUCCESS
-- `4` - WPS_FAILED
-- `5` - WPS_TIMEOUT
+Where `<state>` is:
+- `0` - WPS inactive
+- `1` - WPS active
+
+**On successful WPS connection, the system automatically executes:**
+```
++CWJAP:"<ssid>","<bssid>",<channel>,<rssi>,<pci_en>,<reconn_interval>,<listen_interval>,<scan_mode>,<pmf>
+OK
+```
+
+**On WPS error:**
+```
++CWJAP:<error_code>
+ERROR
+```
 
 #### Examples
 
 **1. Query WPS Status**
 ```
-AT+BNWPS=0
-+BNWPS:0,0
+AT+BNWPS?
++BNWPS:0
 OK
 ```
 
@@ -494,16 +533,16 @@ OK
 AT+BNWPS=120
 OK
 # User presses WPS button on router
-+CWJAP:"MyNetwork","aa:bb:cc:dd:ee:ff",6,-45
-# Automatically connects when WPS succeeds
+# On success:
++CWJAP:"MyNetwork","aa:bb:cc:dd:ee:ff",6,-45,1,0,0,0,0
+OK
 ```
 
-**3. Check WPS Progress**
+**3. Cancel WPS Operation**
 ```
-AT+BNWPS?
-+BNWPS:2,45
+AT+BNWPS=0
++BNWPS:0
 OK
-# State 2 (WPS_ACTIVE), running for 45 seconds
 ```
 
 ### WPS Configuration
@@ -536,67 +575,46 @@ Flashes certificates to dedicated partition storage.
 
 ```
 AT+BNFLASH_CERT=<address>,<data_source>
+AT+BNFLASH_CERT=?              # Test command (show help)
 ```
 
 #### Parameters
 
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|
-| `address` | Hex | 0x380000-0x3BFFFF | Flash address in certificate partition |
-| `data_source` | String | uart/file | Data source (uart for direct input) |
-
-#### Certificate Partition Layout
-
-| Address Range | Size | Purpose |
-|---------------|------|---------|
-| 0x380000-0x383FFF | 16KB | Certificate 1 |
-| 0x344000-0x347FFF | 16KB | Certificate 2 |
-| 0x348000-0x34BFFF | 16KB | Certificate 3 |
-| ... | ... | ... |
-| 0x43C000-0x43FFFF | 16KB | Certificate 63 (last) |
-
-#### Supported Certificate Formats
-
-**PEM Format (Recommended):**
-```
------BEGIN CERTIFICATE-----
-MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJ...
------END CERTIFICATE-----
-```
-
-**DER Format (Binary):**
-- Binary ASN.1 encoded certificates
-- Automatically detected by content analysis
+| `address` | Hex | Certificate partition range | Flash address in certificate partition |
+| `data_source` | String/Integer | @file or byte_count | Data source: SD card file or UART byte count |
 
 #### Usage Examples
 
 **1. Flash CA Certificate via UART**
 ```
-AT+BNFLASH_CERT=0x380000,uart
+AT+BNFLASH_CERT=0x380000,1400
 OK
->
------BEGIN CERTIFICATE-----
+>-----BEGIN CERTIFICATE-----
 MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJ
-RVMxEjAQBgNVBAoTCUJhbHRpbW9yZTEgMB4GA1UECxMXVGVzdCBDQSAoZXhhbXBs
-ZSBvbmx5KTEVMBMGA1UEAxMMVGVzdCBDQSBSb290MB4XDTA0MDEwMTAwMDAwMFoX
-DTI0MTIzMTIzNTk1OVowWjELMAkGA1UEBhMCSUUxEjAQBgNVBAoTCUJhbHRpbW9y
-ZTEgMB4GA1UECxMXVGVzdCBDQSAoZXhhbXBsZSBvbmx5KTEVMBMGA1UEAxMMVGVz
-dCBDQSBSb290MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2jiCXGNV
-...
+...certificate data...
 -----END CERTIFICATE-----
++BNFLASH_CERT:OK,0x380000,1400
 OK
 ```
 
-**2. Flash Client Certificate**
+**2. Flash Certificate from SD Card File**
 ```
-AT+BNFLASH_CERT=0x344000,uart
+AT+BNFLASH_CERT=0x384000,"@/certs/server_key.bin"
++BNFLASH_CERT:OK,0x384000,<file_size>
 OK
->
------BEGIN CERTIFICATE-----
-MIICpjCCAY4CAQAwDQYJKoZIhvcNAQEFBQAwWjELMAkGA1UEBhMCSUUxEjAQBgNV
-...
------END CERTIFICATE-----
-OK
+```
+
+### AT+BNCERT_FLASH - Certificate Flash (Alias)
+
+This is an alias for `AT+BNFLASH_CERT` with identical functionality.
+
+#### Command Syntax
+
+```
+AT+BNCERT_FLASH=<address>,<data_source>
+AT+BNCERT_FLASH=?              # Test command (show help)
 ```
 
 ### AT+BNCERT_LIST - Certificate Listing
@@ -606,8 +624,8 @@ Lists all certificates stored in the partition.
 #### Command Syntax
 
 ```
-AT+BNCERT_LIST?              # List all certificates
-AT+BNCERT_LIST=?             # Test command
+AT+BNCERT_LIST?                # List all certificates
+AT+BNCERT_LIST=?               # Test command
 ```
 
 #### Response Format
@@ -616,10 +634,11 @@ AT+BNCERT_LIST=?             # Test command
 +BNCERT_LIST:<index>,<address>,<size>,<type>
 ```
 
-**Certificate Types:**
-- `1` - CA Certificate (for server verification)
-- `2` - Client Certificate (for client authentication)  
-- `3` - Private Key (for client authentication)
+Where:
+- `<index>`: Certificate index number
+- `<address>`: Flash address (hex)
+- `<size>`: Certificate size in bytes
+- `<type>`: Certificate type (1=CA, 2=Client, 3=Private Key)
 
 #### Example
 
@@ -628,6 +647,52 @@ AT+BNCERT_LIST?
 +BNCERT_LIST:0,0x380000,1584,1
 +BNCERT_LIST:1,0x384000,1124,2
 +BNCERT_LIST:2,0x388000,1679,3
+OK
+```
+
+### AT+BNCERT_ADDR - Certificate Addresses
+
+Lists all valid certificate storage addresses.
+
+#### Command Syntax
+
+```
+AT+BNCERT_ADDR?                # List valid addresses
+AT+BNCERT_ADDR=?               # Test command
+```
+
+### AT+BNCERT_CLEAR - Certificate Clear
+
+Clears (erases) certificate at specific address.
+
+#### Command Syntax
+
+```
+AT+BNCERT_CLEAR=<address>      # Clear certificate at address
+AT+BNCERT_CLEAR=?              # Test command
+```
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `address` | Hex | 4KB-aligned address in certificate partition |
+
+#### Response Format
+
+```
++BNCERT_CLEAR:<result>,<address>
+```
+
+Where `<result>` is:
+- `OK` - Certificate cleared successfully
+- `ERROR` - Clear operation failed
+
+#### Example
+
+```
+AT+BNCERT_CLEAR=0x380000
++BNCERT_CLEAR:OK,0x380000
 OK
 ```
 
@@ -688,7 +753,7 @@ Streams web radio or podcast audio directly to UART.
 #### Command Syntax
 
 ```
-AT+BNWEB_RADIO=<enable>,<url>  # Start/stop streaming
+AT+BNWEB_RADIO=<enable>,<url>  # Start (1) or stop (0) streaming
 AT+BNWEB_RADIO?                # Query streaming status
 AT+BNWEB_RADIO=?               # Test command
 ```
@@ -698,14 +763,24 @@ AT+BNWEB_RADIO=?               # Test command
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|
 | `enable` | Integer | 0-1 | 0=stop, 1=start streaming |
-| `url` | String | 1-512 chars | Radio stream URL (HTTP/HTTPS) |
+| `url` | String | 1-512 chars | Radio stream URL (when enable=1) |
 
 #### Response Format
 
+**Test Command:**
+```
++BNWEB_RADIO:(0,1)
+```
+
 **Status Query:**
 ```
-+BNWEB_RADIO:<active>,<bytes_streamed>,<duration_ms>
++BNWEB_RADIO:<active>[,<bytes_streamed>,<duration_ms>]
 ```
+
+Where:
+- `<active>`: `1` if streaming, `0` if stopped
+- `<bytes_streamed>`: Total bytes streamed (when active)
+- `<duration_ms>`: Streaming duration in milliseconds (when active)
 
 #### Usage Examples
 
@@ -713,7 +788,7 @@ AT+BNWEB_RADIO=?               # Test command
 ```
 AT+BNWEB_RADIO=1,"http://stream.live.vc.bbcmedia.co.uk/bbc_radio_one"
 OK
-# Continuous MP3 audio data flows to UART
+# Continuous audio data flows to UART
 ```
 
 **2. Check Streaming Status**
@@ -793,15 +868,16 @@ Web radio automatically integrates with certificate management:
 #### HTTP/HTTPS Configuration
 
 ```c
-// bncurl_config.h
-#define BNCURL_MAX_URL_LENGTH           2048    // Maximum URL length
-#define BNCURL_MAX_HEADER_LENGTH        4096    // Maximum custom headers
-#define BNCURL_MAX_POST_DATA_SIZE       1048576 // 1MB max POST data
-#define BNCURL_MAX_REDIRECTS            10      // Maximum redirects
+// bncurl_config.h - Key configuration constants
+#define BNCURL_MAX_URL_LENGTH           1024    // Maximum URL length
+#define BNCURL_MAX_HEADERS_COUNT        16      // Maximum custom headers
+#define BNCURL_MAX_HEADER_LENGTH        256     // Maximum single header length
+#define BNCURL_MAX_UART_UPLOAD_SIZE     (512 * 1024)  // 512KB max UART upload
+#define BNCURL_MAX_FILE_UPLOAD_SIZE     (16 * 1024 * 1024)  // 16MB max file upload
 #define BNCURL_DEFAULT_TIMEOUT          30      // Default timeout (seconds)
-#define BNCURL_MAX_TIMEOUT              300     // Maximum timeout (seconds)
-#define BNCURL_BUFFER_SIZE              8192    // Network buffer size
-#define BNCURL_MAX_VERBOSE_LINE_LENGTH  512     // Debug output line length
+#define BNCURL_MIN_TIMEOUT              1       // Minimum timeout
+#define BNCURL_MAX_TIMEOUT              120     // Maximum timeout
+#define BNCURL_SUPPORTED_METHODS_COUNT  3       // GET, POST, HEAD only
 ```
 
 #### Certificate Management Configuration
@@ -932,7 +1008,7 @@ ERROR
 |------|-------|-------------|----------|
 | `1001` | CURL_INIT_FAILED | CURL initialization failed | Restart system, check memory |
 | `1002` | URL_TOO_LONG | URL exceeds maximum length | Use shorter URL (<2048 chars) |
-| `1003` | INVALID_METHOD | Unsupported HTTP method | Use GET/POST/PUT/DELETE/HEAD/PATCH |
+| `1003` | INVALID_METHOD | Unsupported HTTP method | Use GET/POST/HEAD only |
 | `1004` | NETWORK_ERROR | Network connectivity issue | Check WiFi connection |
 | `1005` | TIMEOUT_ERROR | Request timeout | Increase timeout or check network |
 | `1006` | SSL_ERROR | HTTPS/TLS error | Check certificates, try HTTP |
@@ -1186,363 +1262,3 @@ Component config → FAT Filesystem support →
   [*] Long filename support
 ```
 
-#### 4. Main Application Integration
-
-**main.c example:**
-```c
-#include "esp_at.h"
-#include "at_bones.h"
-
-void app_main(void)
-{
-    // Initialize AT framework
-    esp_at_init();
-    
-    // Register custom commands
-    esp_at_custom_cmd_register();
-    
-    // Start AT processing
-    esp_at_start();
-}
-```
-
-### Custom Command Development
-
-#### Adding New Commands
-
-**1. Define command structure:**
-```c
-static const esp_at_cmd_struct custom_commands[] = {
-    {"+MYCMD", my_test_func, my_query_func, my_setup_func, my_exe_func},
-};
-```
-
-**2. Implement command handlers:**
-```c
-static uint8_t my_test_func(uint8_t *cmd_name)
-{
-    esp_at_port_write_data((uint8_t *)"+MYCMD:(0,1)\r\n", 15);
-    return ESP_AT_RESULT_CODE_OK;
-}
-
-static uint8_t my_query_func(uint8_t *cmd_name)
-{
-    esp_at_port_write_data((uint8_t *)"+MYCMD:1\r\n", 10);
-    return ESP_AT_RESULT_CODE_OK;
-}
-
-static uint8_t my_setup_func(uint8_t *cmd_name)
-{
-    // Parse parameters and execute command
-    return ESP_AT_RESULT_CODE_OK;
-}
-```
-
-**3. Register commands:**
-```c
-esp_at_custom_cmd_array_regist(custom_commands, 
-    sizeof(custom_commands) / sizeof(esp_at_cmd_struct));
-```
-
-#### Parameter Parsing
-
-**Integer parameters:**
-```c
-int param_value;
-if (!esp_at_get_para_as_digit(data_ptr, &param_value)) {
-    return ESP_AT_RESULT_CODE_ERROR;
-}
-```
-
-**String parameters:**
-```c
-char string_param[256];
-int param_len = esp_at_get_para_as_str(data_ptr, string_param, sizeof(string_param));
-if (param_len <= 0) {
-    return ESP_AT_RESULT_CODE_ERROR;
-}
-```
-
-### Advanced Integration Features
-
-#### Custom HTTP Methods
-
-**Add new HTTP method:**
-```c
-// In bncurl_methods.h
-typedef enum {
-    BNCURL_METHOD_GET,
-    BNCURL_METHOD_POST,
-    BNCURL_METHOD_PUT,
-    BNCURL_METHOD_DELETE,
-    BNCURL_METHOD_HEAD,
-    BNCURL_METHOD_PATCH,
-    BNCURL_METHOD_OPTIONS,    // New method
-    BNCURL_METHOD_TRACE,      // New method
-} bncurl_method_t;
-```
-
-#### Custom Certificate Validation
-
-**Override certificate validation:**
-```c
-// In bncert_manager.c
-bool custom_cert_validator(const uint8_t *cert_data, size_t cert_size)
-{
-    // Custom validation logic
-    return validate_custom_certificate(cert_data, cert_size);
-}
-```
-
-#### Custom Audio Processing
-
-**Add audio processing to web radio:**
-```c
-// In bnwebradio.c - modify webradio_write_callback
-static size_t webradio_write_callback(void *contents, size_t size, size_t nmemb, void *userp)
-{
-    size_t total_size = size * nmemb;
-    
-    // Add custom audio processing here
-    process_audio_data(contents, total_size);
-    
-    // Stream processed data to UART
-    esp_at_port_write_data((uint8_t *)contents, total_size);
-    
-    return total_size;
-}
-```
-
----
-
-## Troubleshooting
-
-### Common Issues and Solutions
-
-#### Build Issues
-
-**Issue: "component 'at_bones' not found"**
-```bash
-# Solution: Check component path in CMakeLists.txt
-set(EXTRA_COMPONENT_DIRS "components/at_bones")
-```
-
-**Issue: "undefined reference to curl functions"**
-```bash
-# Solution: Add libcurl-esp32 to dependencies
-set(COMPONENTS ... libcurl-esp32)
-```
-
-**Issue: "partition table too large"**
-```bash
-# Solution: Increase partition table size in sdkconfig
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-```
-
-#### Runtime Issues
-
-**Issue: AT commands not responding**
-```bash
-# Debug: Check UART configuration
-CONFIG_AT_UART_PORT=1
-CONFIG_AT_UART_BAUD_RATE=115200
-
-# Test basic AT command
-AT
-OK
-```
-
-**Issue: HTTP requests failing**
-```bash
-# Debug: Check WiFi connection
-AT+CWJAP?
-+CWJAP:"network_name","aa:bb:cc:dd:ee:ff",6,-45
-OK
-
-# Test simple HTTP request
-AT+BNCURL=GET,"http://httpbin.org/get"
-```
-
-**Issue: HTTPS certificate errors**
-```bash
-# Debug: List certificates
-AT+BNCERT_LIST?
-+BNCERT_LIST:0,0x380000,1584,1
-OK
-
-# Test with HTTP first
-AT+BNCURL=GET,"http://httpbin.org/get"
-```
-
-**Issue: SD card not mounting**
-```bash
-# Debug: Check SD card detection
-AT+BNSD_MOUNT="/sdcard"
-+ERROR:2001,"SD card not detected"
-
-# Solution: Check hardware connections and card format
-```
-
-**Issue: Web radio not streaming**
-```bash
-# Debug: Test with simple HTTP stream
-AT+BNWEB_RADIO=1,"http://stream.example.com/test.mp3"
-
-# Check stream status
-AT+BNWEB_RADIO?
-+BNWEB_RADIO:1,1024,5000
-OK
-```
-
-### Debug Mode Configuration
-
-#### Enable Debug Logging
-
-**In sdkconfig:**
-```
-CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
-CONFIG_LOG_MAXIMUM_LEVEL=4
-```
-
-**Component-specific logging:**
-```c
-// Set log levels for specific components
-esp_log_level_set("BNCURL", ESP_LOG_DEBUG);
-esp_log_level_set("BNCERT", ESP_LOG_DEBUG);
-esp_log_level_set("BNWPS", ESP_LOG_DEBUG);
-esp_log_level_set("BNWEBRADIO", ESP_LOG_DEBUG);
-```
-
-#### Monitor Output
-
-**Serial monitor:**
-```bash
-# Use ESP-IDF monitor for debugging
-idf.py monitor
-
-# Filter for specific component
-idf.py monitor | grep "BNCURL"
-```
-
-**Log analysis:**
-```bash
-# Save logs to file for analysis
-idf.py monitor > debug.log 2>&1
-
-# Search for errors
-grep "ERROR" debug.log
-grep "WARN" debug.log
-```
-
-### Performance Monitoring
-
-#### Memory Usage Monitoring
-
-**Add to main application:**
-```c
-void print_memory_stats(void)
-{
-    ESP_LOGI("MEMORY", "Free heap: %d bytes", esp_get_free_heap_size());
-    ESP_LOGI("MEMORY", "Minimum free heap: %d bytes", esp_get_minimum_free_heap_size());
-    
-    // Print task stack usage
-    TaskStatus_t task_status;
-    vTaskGetInfo(NULL, &task_status, pdTRUE, eInvalid);
-    ESP_LOGI("MEMORY", "Task stack high water mark: %d", task_status.usStackHighWaterMark);
-}
-```
-
-#### Network Performance Monitoring
-
-**Add to HTTP operations:**
-```c
-void monitor_http_performance(void)
-{
-    uint32_t start_time = esp_timer_get_time();
-    
-    // Perform HTTP operation
-    bool result = bncurl_execute_request(...);
-    
-    uint32_t end_time = esp_timer_get_time();
-    uint32_t duration_ms = (end_time - start_time) / 1000;
-    
-    ESP_LOGI("PERF", "HTTP request completed in %d ms", duration_ms);
-}
-```
-
-### Factory Reset and Recovery
-
-#### Software Reset
-
-**Reset to factory defaults:**
-```bash
-# Erase entire flash
-esptool.py --port COM3 erase_flash
-
-# Flash factory firmware
-idf.py flash
-```
-
-#### Selective Reset
-
-**Reset specific components:**
-```bash
-# Clear certificate partition
-esptool.py --port COM3 erase_region 0x380000 0x40000
-
-# Clear NVS (WiFi settings)
-esptool.py --port COM3 erase_region 0x9000 0x6000
-```
-
-#### Recovery Mode
-
-**Enter recovery mode:**
-```c
-// Add to main application for emergency recovery
-void enter_recovery_mode(void)
-{
-    ESP_LOGW("RECOVERY", "Entering recovery mode");
-    
-    // Reset all subsystems
-    bnwebradio_stop();
-    bncurl_stop_all_operations();
-    at_sd_unmount();
-    
-    // Clear runtime state
-    nvs_flash_erase();
-    esp_restart();
-}
-```
-
----
-
-## Conclusion
-
-The AT Bones framework provides a comprehensive solution for ESP32 HTTP/HTTPS operations, certificate management, storage handling, and audio streaming. With its modular architecture and extensive configuration options, it can be adapted for a wide range of IoT applications.
-
-### Key Benefits
-
-- **Comprehensive HTTP/HTTPS support** with certificate management
-- **Flexible certificate system** with automatic type detection
-- **Robust error handling** and recovery mechanisms
-- **Performance optimized** for ESP32 constraints
-- **Extensive documentation** for easy integration and modification
-
-### Future Development
-
-The framework is designed for extensibility. Future enhancements may include:
-
-- **WebSocket support** for real-time communication
-- **MQTT integration** for IoT messaging
-- **Advanced audio processing** for web radio streams
-- **Database connectivity** for data persistence
-- **Cloud service integrations** for popular IoT platforms
-
-For support and contributions, refer to the individual component documentation and the project repository.
-
----
-
-**Last Updated:** August 31, 2025  
-**Version:** 2.0  
-**Author:** AT Bones Development Team  
-**License:** Apache 2.0

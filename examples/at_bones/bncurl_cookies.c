@@ -17,6 +17,9 @@
 
 static const char *TAG = "BNCURL_COOKIES";
 
+// Forward declaration for static helper function
+static void bncurl_cookies_stream_single_to_uart(const bncurl_cookie_t *cookie);
+
 // Cookie write callback for libcurl
 size_t cookie_header_callback(char *buffer, size_t size, size_t nitems, void *userdata)
 {
@@ -136,15 +139,9 @@ void bncurl_cookies_cleanup_context(bncurl_cookie_context_t *cookie_ctx)
         return;
     }
     
-    // Stream any captured cookies before cleanup
-    if (cookie_ctx->cookie_count > 0) {
-        if (cookie_ctx->send_to_uart) {
-            bncurl_cookies_stream_to_uart(cookie_ctx);
-        }
-        
-        if (cookie_ctx->save_to_file) {
-            bncurl_cookies_save_to_file(cookie_ctx);
-        }
+    // Save cookies to file if configured (cookies already streamed to UART individually)
+    if (cookie_ctx->cookie_count > 0 && cookie_ctx->save_to_file) {
+        bncurl_cookies_save_to_file(cookie_ctx);
     }
     
     memset(cookie_ctx, 0, sizeof(bncurl_cookie_context_t));
@@ -209,6 +206,12 @@ bool bncurl_cookies_parse_and_add(bncurl_cookie_context_t *cookie_ctx, const cha
     cookie_ctx->cookie_count++;
     
     ESP_LOGI(TAG, "Added cookie: %s=%s (count: %d)", cookie->name, cookie->value, cookie_ctx->cookie_count);
+    
+    // Stream cookie to UART immediately when received
+    if (cookie_ctx->send_to_uart) {
+        bncurl_cookies_stream_single_to_uart(cookie);
+    }
+    
     return true;
 }
 
@@ -222,40 +225,48 @@ void bncurl_cookies_stream_to_uart(const bncurl_cookie_context_t *cookie_ctx)
     
     for (int i = 0; i < cookie_ctx->cookie_count; i++) {
         const bncurl_cookie_t *cookie = &cookie_ctx->cookies[i];
-        
-        // Create cookie output line
-        char cookie_line[256];
-        int line_len = snprintf(cookie_line, sizeof(cookie_line), 
-                               "+COOKIE:%s=%s", cookie->name, cookie->value);
-        
-        // Add domain if available
-        if (strlen(cookie->domain) > 0) {
-            int remaining = sizeof(cookie_line) - line_len - 1;
-            line_len += snprintf(cookie_line + line_len, remaining, "; Domain=%s", cookie->domain);
-        }
-        
-        // Add path if available
-        if (strlen(cookie->path) > 0) {
-            int remaining = sizeof(cookie_line) - line_len - 1;
-            line_len += snprintf(cookie_line + line_len, remaining, "; Path=%s", cookie->path);
-        }
-        
-        // Add flags
-        if (cookie->secure) {
-            int remaining = sizeof(cookie_line) - line_len - 1;
-            line_len += snprintf(cookie_line + line_len, remaining, "; Secure");
-        }
-        
-        if (cookie->http_only) {
-            int remaining = sizeof(cookie_line) - line_len - 1;
-            line_len += snprintf(cookie_line + line_len, remaining, "; HttpOnly");
-        }
-        
-        // Add CRLF and send
-        if (line_len < sizeof(cookie_line) - 2) {
-            strcat(cookie_line, "\r\n");
-            esp_at_port_write_data((uint8_t *)cookie_line, strlen(cookie_line));
-        }
+        bncurl_cookies_stream_single_to_uart(cookie);
+    }
+}
+
+static void bncurl_cookies_stream_single_to_uart(const bncurl_cookie_t *cookie)
+{
+    if (!cookie) {
+        return;
+    }
+    
+    // Create cookie output line
+    char cookie_line[256];
+    int line_len = snprintf(cookie_line, sizeof(cookie_line), 
+                           "+COOKIE:%s=%s", cookie->name, cookie->value);
+    
+    // Add domain if available
+    if (strlen(cookie->domain) > 0) {
+        int remaining = sizeof(cookie_line) - line_len - 1;
+        line_len += snprintf(cookie_line + line_len, remaining, "; Domain=%s", cookie->domain);
+    }
+    
+    // Add path if available
+    if (strlen(cookie->path) > 0) {
+        int remaining = sizeof(cookie_line) - line_len - 1;
+        line_len += snprintf(cookie_line + line_len, remaining, "; Path=%s", cookie->path);
+    }
+    
+    // Add flags
+    if (cookie->secure) {
+        int remaining = sizeof(cookie_line) - line_len - 1;
+        line_len += snprintf(cookie_line + line_len, remaining, "; Secure");
+    }
+    
+    if (cookie->http_only) {
+        int remaining = sizeof(cookie_line) - line_len - 1;
+        line_len += snprintf(cookie_line + line_len, remaining, "; HttpOnly");
+    }
+    
+    // Add CRLF and send
+    if (line_len < sizeof(cookie_line) - 2) {
+        strcat(cookie_line, "\r\n");
+        esp_at_port_write_data((uint8_t *)cookie_line, strlen(cookie_line));
     }
 }
 

@@ -20,8 +20,8 @@
 
 // Pin assignments for SD card (based on ESP-IDF example)
 
+// #define STEPHAN_BUILD
 #ifdef STEPHAN_BUILD
-
 /*
 +--------------+----------+-------+
 * | SPI Pin | ESP32‑C6 | SD_MMC
@@ -113,8 +113,8 @@ bool at_sd_mount(const char *mount_point)
     
     // Configure SPI host (following ESP-IDF example pattern)
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.max_freq_khz = 10000;  // 10MHz
-    
+    host.max_freq_khz = 32000;  // Start at 32MHz 
+
     // Configure SPI bus
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = PIN_NUM_MOSI,
@@ -122,9 +122,12 @@ bool at_sd_mount(const char *mount_point)
         .sclk_io_num = PIN_NUM_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
+        .max_transfer_sz = 64 * 1024,  // Large transfers for better throughput
+        .flags = SPICOMMON_BUSFLAG_MASTER
     };
-    
+
+    printf("Initializing SPI bus...\n");
+    printf("Pins : CS %d, MISO %d, MOSI %d, CLK %d\n", PIN_NUM_CS, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_NUM_CLK);
     esp_err_t ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
