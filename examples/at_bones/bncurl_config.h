@@ -18,16 +18,16 @@
 
 /* ==================== URL Configuration ==================== */
 /** Maximum URL length (based on spec examples like weather API) */
-#define BNCURL_MAX_URL_LENGTH           1024
+#define BNCURL_MAX_URL_LENGTH           256
 
 /** Maximum hostname length (RFC 1035 limit) */
 #define BNCURL_MAX_HOSTNAME_LENGTH      253
 
 /** Maximum path length in URL */
-#define BNCURL_MAX_URL_PATH_LENGTH      512
+#define BNCURL_MAX_URL_PATH_LENGTH      256
 
 /** Maximum query string length */
-#define BNCURL_MAX_QUERY_STRING_LENGTH  512
+#define BNCURL_MAX_QUERY_STRING_LENGTH  256
 
 /* ==================== HTTP Method Configuration ==================== */
 /** Maximum method name length */

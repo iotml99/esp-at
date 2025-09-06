@@ -26,7 +26,6 @@
 
 static bncurl_context_t *bncurl_ctx = NULL;
 
-
 static const char *TAG = "AT_BONES";
 
 // UART data collection timeout (30 seconds)
@@ -139,6 +138,7 @@ static uint8_t at_test_cmd_test(uint8_t *cmd_name)
         "HTTP/HTTPS client with libcurl support\r\n"
         "\r\n"
         "Methods: GET, POST, HEAD\r\n"
+        "URL: Use \".\" to reference URL set by AT+BNURLCFG\r\n"
         "Options:\r\n"
         "  -H \"Header: Value\"  Custom HTTP header\r\n"
         "  -du <bytes|@file>   Upload data (POST only)\r\n"
@@ -148,14 +148,13 @@ static uint8_t at_test_cmd_test(uint8_t *cmd_name)
         "  -r <start-end>      Range request (GET only, optional with -dd)\r\n"
         "  -v                  Verbose debug output\r\n"
         "\r\n"
-        "Range Downloads:\r\n"
-        "  -r \"0-2097151\"       Download bytes 0-2097151 (to file or UART)\r\n"
-        "  -r \"2097152-4194303\" Download next 2MB chunk (to file or UART)\r\n"
-        "  With -dd: appends to file | Without -dd: streams to UART\r\n"
+        "URL Configuration:\r\n"
+        "  AT+BNURLCFG=\"https://example.com/very/long/url\"\r\n"
+        "  AT+BNCURL=\"GET\",\".\"     # Uses configured URL\r\n"
         "\r\n"
         "Examples:\r\n"
         "  AT+BNCURL=\"GET\",\"http://example.com/file.mp3\",\"-dd\",\"@file.mp3\",\"-r\",\"0-2097151\"\r\n"
-        "  AT+BNCURL=\"GET\",\"http://example.com/file.mp3\",\"-r\",\"0-2097151\"\r\n");
+        "  AT+BNCURL=\"GET\",\".\",\"-r\",\"0-2097151\"  # Uses AT+BNURLCFG URL\r\n");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
 
     return ESP_AT_RESULT_CODE_OK;
@@ -835,8 +834,73 @@ static uint8_t at_bnweb_radio_setup(uint8_t para_num)
     return ESP_AT_RESULT_CODE_ERROR;
 }
 
+// BNURLCFG Command Handlers - for setting next BNCURL URL as workaround for long commands
+static uint8_t at_bnurlcfg_test(uint8_t *cmd_name)
+{
+    uint8_t buffer[256] = {0};
+    snprintf((char *)buffer, 256,
+        "+BNURLCFG:<url>\r\n"
+        "Set URL for next BNCURL command\r\n"
+        "\r\n"
+        "This command allows setting a URL that can be referenced\r\n"
+        "in AT+BNCURL by using \".\" in place of the URL parameter.\r\n"
+        "\r\n"
+        "Examples:\r\n"
+        "  AT+BNURLCFG=\"https://httpbin.org/get\"\r\n"
+        "  AT+BNCURL=\"GET\",\".\"\r\n"
+        "\r\n"
+        "Use this as a workaround for very long URLs that exceed\r\n"
+        "AT command line length limits.\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnurlcfg_query(uint8_t *cmd_name)
+{
+    uint8_t buffer[512] = {0};
+    
+    const char* configured_url = bncurl_get_configured_url();
+    if (configured_url) {
+        snprintf((char *)buffer, 512, "+BNURLCFG:\"%s\"\r\n", configured_url);
+    } else {
+        snprintf((char *)buffer, 512, "+BNURLCFG:<not set>\r\n");
+    }
+    
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+static uint8_t at_bnurlcfg_setup(uint8_t para_num)
+{
+    uint8_t *url_param = NULL;
+    
+    // Need exactly 1 parameter: URL
+    if (para_num != 1) {
+        esp_at_port_write_data((uint8_t *)"ERROR: AT+BNURLCFG requires exactly 1 parameter: <url>\r\n", 58);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Parse URL parameter
+    if (esp_at_get_para_as_str(0, &url_param) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        esp_at_port_write_data((uint8_t *)"ERROR: Failed to parse URL parameter\r\n", 39);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Use the bncurl_params function to validate and store the URL
+    if (!bncurl_set_configured_url((char *)url_param)) {
+        esp_at_port_write_data((uint8_t *)"ERROR: Invalid URL format or length. Must start with http:// or https://\r\n", 75);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    
+    // Log success
+    ESP_LOGI(TAG, "URL configured for next BNCURL: %s", (char *)url_param);
+    
+    return ESP_AT_RESULT_CODE_OK;
+}
+
 static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
+    {"+BNURLCFG", at_bnurlcfg_test, at_bnurlcfg_query, at_bnurlcfg_setup, NULL},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
     {"+BNCURL_STOP", NULL, at_bncurl_stop_query, NULL, NULL},
     {"+BNCURL_PROG", NULL, at_bncurl_prog_query, NULL, NULL},

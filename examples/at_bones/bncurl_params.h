@@ -103,4 +103,24 @@ void bncurl_params_cleanup(bncurl_params_t *params);
  */
 void normalize_path_with_mount_point(char *path, size_t max_length);
 
+/**
+ * @brief Get the configured URL from BNURLCFG command
+ * 
+ * This function returns the URL that was set using the AT+BNURLCFG command.
+ * This URL can be used as a substitute when "." is passed as the URL parameter.
+ * 
+ * @return Pointer to the configured URL string, or NULL if no URL is configured
+ */
+const char* bncurl_get_configured_url(void);
+
+/**
+ * @brief Set the configured URL for BNURLCFG command
+ * 
+ * This function is used internally to store the URL from AT+BNURLCFG command.
+ * 
+ * @param url The URL to store (must be valid HTTP/HTTPS URL)
+ * @return true on success, false on error
+ */
+bool bncurl_set_configured_url(const char* url);
+
 #endif // BNCURL_PARAMS_H

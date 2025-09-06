@@ -19,6 +19,44 @@
 
 static const char *TAG = "BNCURL_PARAMS";
 
+// Global storage for configured URL from BNURLCFG command
+static char s_configured_url[BNCURL_MAX_URL_LENGTH + 1] = {0};
+
+// Function to get configured URL
+const char* bncurl_get_configured_url(void)
+{
+    if (strlen(s_configured_url) > 0) {
+        return s_configured_url;
+    }
+    return NULL;
+}
+
+// Function to set configured URL
+bool bncurl_set_configured_url(const char* url)
+{
+    if (!url) {
+        // Clear the configured URL
+        s_configured_url[0] = '\0';
+        return true;
+    }
+    
+    // Validate URL length
+    if (strlen(url) > BNCURL_MAX_URL_LENGTH) {
+        return false;
+    }
+    
+    // Validate URL format
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+        return false;
+    }
+    
+    // Store the URL
+    strncpy(s_configured_url, url, BNCURL_MAX_URL_LENGTH);
+    s_configured_url[BNCURL_MAX_URL_LENGTH] = '\0';
+    
+    return true;
+}
+
 // Function to print parsed parameters
 static void print_bncurl_params(const bncurl_params_t *params)
 {
@@ -342,13 +380,29 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
-    // Copy URL with length validation
-    if (strlen((char *)param_str) > BNCURL_MAX_URL_LENGTH) {
-        printf("ERROR: URL too long. Max length: %d\n", BNCURL_MAX_URL_LENGTH);
-        return ESP_AT_RESULT_CODE_ERROR;
+    // Check if URL is "." - substitute with configured URL
+    if (strcmp((char *)param_str, ".") == 0) {
+        const char* configured_url = bncurl_get_configured_url();
+        if (!configured_url) {
+            printf("ERROR: No URL configured with AT+BNURLCFG. Cannot use '.' as URL.\n");
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
+        // Use the configured URL
+        strncpy(params->url, configured_url, BNCURL_MAX_URL_LENGTH);
+        params->url[BNCURL_MAX_URL_LENGTH] = '\0';
+        
+        printf("INFO: Using configured URL: %s\n", params->url);
+        ESP_LOGI(TAG, "Substituted '.' with configured URL: %s", params->url);
+    } else {
+        // Copy URL with length validation
+        if (strlen((char *)param_str) > BNCURL_MAX_URL_LENGTH) {
+            printf("ERROR: URL too long. Max length: %d\n", BNCURL_MAX_URL_LENGTH);
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        strncpy(params->url, (char *)param_str, BNCURL_MAX_URL_LENGTH);
+        params->url[BNCURL_MAX_URL_LENGTH] = '\0';
     }
-    strncpy(params->url, (char *)param_str, BNCURL_MAX_URL_LENGTH);
-    params->url[BNCURL_MAX_URL_LENGTH] = '\0';
     
     if (!is_valid_url(params->url)) {
         printf("ERROR: Invalid URL '%s'. Must start with http:// or https://\n", params->url);

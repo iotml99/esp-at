@@ -14,7 +14,7 @@
 #include "bncurl.h"
 
 // Executor task configuration
-#define BNCURL_EXECUTOR_STACK_SIZE    (24 * 1024)  // Increased for larger stream buffers
+#define BNCURL_EXECUTOR_STACK_SIZE    (32 * 1024)  // Increased for SSL operations + large stream buffers
 #define BNCURL_EXECUTOR_PRIORITY      (2)
 
 // Executor status enumeration

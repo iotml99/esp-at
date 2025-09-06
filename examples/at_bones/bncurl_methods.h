@@ -17,7 +17,7 @@
 #define BNCURL_FSYNC_INTERVAL (128 * 1024)  // 128KB (reduced for better data safety)
 
 // Buffer structure for dual-buffer streaming
-#define BNCURL_STREAM_BUFFER_SIZE   (6 * 1024)   // 6KB per buffer (12KB total, safe with 24KB stack)
+#define BNCURL_STREAM_BUFFER_SIZE   (4 * 1024)   // 4KB per buffer (8KB total, safe with SSL operations)
 #define BNCURL_STREAM_BUFFER_COUNT  2             // Two buffers for ping-pong
 
 // Streaming buffer structure
