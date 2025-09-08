@@ -13,6 +13,7 @@ AT Bones extends ESP32 AT commands with HTTP/HTTPS client, SD card management, W
 | Command | Purpose | Example |
 |---------|---------|---------|
 | `AT+BNCURL` | HTTP/HTTPS requests | `AT+BNCURL="GET","https://httpbin.org/get"` |
+| `AT+BNURLCFG` | Configure URL for BNCURL | `AT+BNURLCFG="https://very-long-url.com/path"` |
 | `AT+BNSD_MOUNT` | Mount SD card | `AT+BNSD_MOUNT="/sdcard"` |
 | `AT+BNWPS` | WiFi WPS setup | `AT+BNWPS=120` |
 | `AT+BNFLASH_CERT` | Flash certificates | `AT+BNFLASH_CERT=0x380000,1024` |
@@ -21,6 +22,35 @@ AT Bones extends ESP32 AT commands with HTTP/HTTPS client, SD card management, W
 ---
 
 ## 📡 HTTP/HTTPS Client (BNCURL)
+
+### URL Configuration
+
+**Configure URL for Long Commands:**
+```
+AT+BNURLCFG="https://very-long-domain-name.example.com/api/v2/endpoints/data/download"
+OK
+
+# Now use "." to reference the configured URL
+AT+BNCURL="GET","."
+OK
+```
+
+**Query Configured URL:**
+```
+AT+BNURLCFG?
++BNURLCFG:"https://very-long-domain-name.example.com/api/v2/endpoints/data/download"
+OK
+```
+
+**Clear Configured URL:**
+```
+AT+BNURLCFG=""
+OK
+
+AT+BNURLCFG?
++BNURLCFG:<not set>
+OK
+```
 
 ### Basic HTTP Requests
 
@@ -49,6 +79,16 @@ AT+BNCURL="POST","https://httpbin.org/post","-du","@/data.json"
 OK
 ```
 
+**Using Configured URL:**
+```
+AT+BNURLCFG="https://api.example.com/v2/upload/endpoint"
+OK
+
+AT+BNCURL="POST",".","-du","25"
+OK
+>{"message":"hello world"}
+```
+
 ### File Downloads
 
 **Download to SD Card:**
@@ -60,6 +100,15 @@ OK
 **Range Download (partial content):**
 ```
 AT+BNCURL="GET","https://example.com/large-file.zip","-r","0-1048575","-dd","@/downloads/part1.zip"
+OK
+```
+
+**Range Download with Configured URL:**
+```
+AT+BNURLCFG="https://cdn.example.com/releases/firmware-v2.1.0.bin"
+OK
+
+AT+BNCURL="GET",".","-r","0-1048575","-dd","@/downloads/firmware_part1.bin"
 OK
 ```
 
@@ -107,6 +156,7 @@ OK
 
 | Option | Description | Example |
 |--------|-------------|---------|
+| `"."` | Use URL from AT+BNURLCFG | `AT+BNCURL="GET","."` |
 | `-H "Header: Value"` | Custom HTTP header | `-H "Authorization: Bearer token123"` |
 | `-du <bytes>` | Upload data via UART | `-du 100` (prompts for 100 bytes) |
 | `-du @file` | Upload from SD card file | `-du @/uploads/data.json` |
@@ -328,6 +378,22 @@ AT+BNWEB_RADIO=1,"https://playerservices.streamtheworld.com/api/livestream"
 
 ## 🔧 Common Usage Patterns
 
+### Long URL Workaround
+
+```bash
+# 1. Configure very long URL
+AT+BNURLCFG="https://very-long-domain-name.example.com/api/v2/endpoints/data/download/files/large-dataset.json"
+OK
+
+# 2. Use "." to reference configured URL
+AT+BNCURL="GET",".","-dd","@/data/dataset.json"
+OK
+
+# 3. Reuse same URL with different options
+AT+BNCURL="GET",".","-r","0-1048575","-dd","@/data/dataset_part1.json"
+OK
+```
+
 ### Setup WiFi with WPS
 
 ```bash
@@ -363,8 +429,12 @@ OK
 ### Upload Data with Custom Headers
 
 ```bash
-# 1. Prepare data via UART
-AT+BNCURL="POST","https://api.example.com/data","-H","Content-Type: application/json","-H","Authorization: Bearer xyz123","-du","45"
+# 1. Configure API endpoint
+AT+BNURLCFG="https://api.example.com/v1/sensors/temperature/readings"
+OK
+
+# 2. Prepare data via UART with headers
+AT+BNCURL="POST",".","-H","Content-Type: application/json","-H","Authorization: Bearer xyz123","-du","45"
 OK
 >{"sensor":"temperature","value":23.5,"unit":"C"}
 
@@ -374,12 +444,16 @@ OK
 ### Stream Large File in Chunks
 
 ```bash
-# Download first 2MB
-AT+BNCURL="GET","https://example.com/largefile.zip","-r","0-2097151","-dd","@/part1.zip"
+# 1. Configure large file URL
+AT+BNURLCFG="https://releases.example.com/firmware/esp32-firmware-v2.1.0.bin"
 OK
 
-# Download next 2MB  
-AT+BNCURL="GET","https://example.com/largefile.zip","-r","2097152-4194303","-dd","@/part2.zip"
+# 2. Download first 2MB
+AT+BNCURL="GET",".","-r","0-2097151","-dd","@/firmware/part1.bin"
+OK
+
+# 3. Download next 2MB  
+AT+BNCURL="GET",".","-r","2097152-4194303","-dd","@/firmware/part2.bin"
 OK
 ```
 
@@ -404,6 +478,21 @@ AT+BNCURL="GET","https://example.com/file.pdf","-dd","/downloads/file.pdf"
 - ✅ **POST** - Send data  
 - ✅ **HEAD** - Get headers only
 - ❌ PUT, DELETE, PATCH - Not supported
+
+### URL Configuration
+
+**Use AT+BNURLCFG for long URLs:**
+```bash
+# ✅ Correct - for very long URLs
+AT+BNURLCFG="https://very-long-domain-name.example.com/api/v2/endpoints/data"
+AT+BNCURL="GET","."
+
+# ✅ Also correct - direct URL
+AT+BNCURL="GET","https://short-url.com/api"
+
+# ❌ Wrong - URL not configured when using "."
+AT+BNCURL="GET","."  # Error if no URL configured
+```
 
 ### UART Data Input
 
@@ -433,6 +522,8 @@ HTTPS requests automatically use flashed certificates:
 | Command | Quick Example |
 |---------|---------------|
 | GET request | `AT+BNCURL="GET","https://httpbin.org/get"` |
+| Configure URL | `AT+BNURLCFG="https://very-long-url.example.com/path"` |
+| Use configured URL | `AT+BNCURL="GET","."` |
 | POST data | `AT+BNCURL="POST","https://httpbin.org/post","-du","20"` |
 | Download file | `AT+BNCURL="GET","https://example.com/file.pdf","-dd","@/file.pdf"` |
 | Mount SD | `AT+BNSD_MOUNT="/sdcard"` |

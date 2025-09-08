@@ -257,6 +257,54 @@ OK
 
 ### 5. HTTP Operations with BNCURL
 
+#### URL Configuration with BNURLCFG
+
+For very long URLs that might exceed AT command line limits, you can use the AT+BNURLCFG command to pre-configure a URL, then reference it using "." in AT+BNCURL commands.
+
+##### Set URL Configuration
+```
+AT+BNURLCFG="https://api.example.com/very/long/endpoint/with/many/parameters?param1=value1&param2=value2"
+```
+**Expected Response:**
+```
+OK
+```
+
+##### Query Current URL Configuration
+```
+AT+BNURLCFG?
+```
+**Expected Response:**
+```
++BNURLCFG:"https://api.example.com/very/long/endpoint/with/many/parameters?param1=value1&param2=value2"
+OK
+```
+
+##### Use Configured URL in BNCURL
+```
+AT+BNCURL="GET","."
+```
+**Expected Response:**
+```
+INFO: Using configured URL: https://api.example.com/very/long/endpoint/with/many/parameters?param1=value1&param2=value2
+[... normal BNCURL response ...]
+SEND OK
+
+OK
+```
+
+##### Example Workflow for Long URLs
+```
+# 1. Configure the URL
+AT+BNURLCFG="https://httpbin.org/get?very_long_parameter=some_very_long_value_that_makes_the_url_exceed_normal_limits"
+
+# 2. Use the configured URL with additional options
+AT+BNCURL="GET",".","dd","@/sdcard/response.json"
+
+# 3. Check what URL is currently configured
+AT+BNURLCFG?
+```
+
 #### Test BNCURL Command Help
 ```
 AT+BNCURL=?
@@ -267,6 +315,9 @@ Usage:
   AT+BNCURL?                                    Query last HTTP code/URL
   AT+BNCURL                                     Execute default request (internal URL)
   AT+BNCURL="GET","<url>"[,"<options>"...]    Perform HTTP GET
+  AT+BNURLCFG="<url>"                          Configure URL for use with "."
+URL:
+  Use "." to reference URL set by AT+BNURLCFG
 Options:
   -dd <filepath>   Save body to SD card file (requires mounted SD)
 Examples:
@@ -274,6 +325,8 @@ Examples:
   AT+BNCURL="GET","https://httpbin.org/get"      Stream to UART (HTTPS)
   AT+BNCURL="GET","http://httpbin.org/get","-dd","/sdcard/response.json"   Save to file (HTTP)
   AT+BNCURL="GET","https://httpbin.org/get","-dd","/sdcard/response.json"  Save to file (HTTPS)
+  AT+BNURLCFG="https://httpbin.org/get"          Configure URL
+  AT+BNCURL="GET","."                           Use configured URL
 Note: Try HTTP first if HTTPS has TLS issues
 
 OK
@@ -334,6 +387,19 @@ Common error responses:
 - `+BNCURL: ERROR XX <description>` - Various curl/network errors
 
 ## Troubleshooting
+
+### URL Configuration Issues
+
+1. **ERROR: Invalid URL format:** URL must start with `http://` or `https://`
+2. **ERROR: URL too long:** Maximum URL length is 256 characters
+3. **ERROR: No URL configured:** Must use `AT+BNURLCFG` before using "." in `AT+BNCURL`
+4. **Example of proper URL format:**
+   ```
+   ✓ AT+BNURLCFG="https://httpbin.org/get"
+   ✓ AT+BNURLCFG="http://api.example.com/endpoint"
+   ✗ AT+BNURLCFG="ftp://example.com"              # Wrong protocol
+   ✗ AT+BNURLCFG="www.example.com"                # Missing protocol
+   ```
 
 ### SD Card Issues
 1. **Mount fails:** Check wiring, ensure 3.3V power, verify SD card is FAT32 formatted

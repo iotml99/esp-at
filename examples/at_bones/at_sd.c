@@ -20,7 +20,7 @@
 
 // Pin assignments for SD card (based on ESP-IDF example)
 
-// #define STEPHAN_BUILD
+#define STEPHAN_BUILD
 #ifdef STEPHAN_BUILD
 /*
 +--------------+----------+-------+
