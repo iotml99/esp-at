@@ -20,7 +20,7 @@
 
 // Pin assignments for SD card (based on ESP-IDF example)
 
-#define STEPHAN_BUILD
+// #define STEPHAN_BUILD
 #ifdef STEPHAN_BUILD
 /*
 +--------------+----------+-------+
@@ -109,13 +109,28 @@ bool at_sd_mount(const char *mount_point)
         g_sd_ctx.mount_point[sizeof(g_sd_ctx.mount_point) - 1] = '\0';
     }
     
-    ESP_LOGI(TAG, "Mounting SD card at %s", g_sd_ctx.mount_point);
+    ESP_LOGI(TAG, "Starting adaptive frequency SD card mount at %s", g_sd_ctx.mount_point);
     
-    // Configure SPI host (following ESP-IDF example pattern)
+    // Adaptive frequency array - start low, increase progressively
+    // 100kHz: Safe initialization for all cards
+    // 400kHz: SD card specification minimum
+    // 1MHz: Low speed but reliable
+    // 4MHz: Standard speed  
+    // 10MHz: Good performance
+    // 20MHz: High performance
+    // 26MHz: High performance
+    // 32MHz: Maximum for many cards
+    // 40MHz: Maximum supported by ESP32
+    const uint32_t freq_steps[] = {100, 400, 1000, 4000, 10000, 20000, 26000, 32000, 40000}; // kHz
+    const size_t freq_count = sizeof(freq_steps) / sizeof(freq_steps[0]);
+    
+    ESP_LOGI(TAG, "Using %u frequency steps: 100kHz -> 40MHz", freq_count);
+    
+    esp_err_t ret = ESP_FAIL;
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.max_freq_khz = 32000;  // Start at 32MHz 
-
-    // Configure SPI bus
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    
+    // Configure SPI bus (done once)
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = PIN_NUM_MOSI,
         .miso_io_num = PIN_NUM_MISO,
@@ -126,30 +141,68 @@ bool at_sd_mount(const char *mount_point)
         .flags = SPICOMMON_BUSFLAG_MASTER
     };
 
-    printf("Initializing SPI bus...\n");
-    printf("Pins : CS %d, MISO %d, MOSI %d, CLK %d\n", PIN_NUM_CS, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_NUM_CLK);
-    esp_err_t ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
+    ESP_LOGI(TAG, "Initializing SPI bus with pins: CS=%d, MISO=%d, MOSI=%d, CLK=%d", 
+             PIN_NUM_CS, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_NUM_CLK);
+    
+    ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
         return false;
     }
     
     // Configure SD card slot
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
     
-    // Mount filesystem
-    ret = esp_vfs_fat_sdspi_mount(g_sd_ctx.mount_point, &host, &slot_config, 
-                                  &g_sd_ctx.mount_config, &g_sd_ctx.card);
+    // Try mounting at progressively higher frequencies - single loop approach
+    bool mount_success = false;
+    uint32_t working_freq = 0;
     
-    if (ret != ESP_OK) {
-        if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount filesystem. "
-                     "If you want the card to be formatted, set format_if_mount_failed = true.");
+    for (size_t i = 0; i < freq_count; i++) {
+        host.max_freq_khz = freq_steps[i];
+        ESP_LOGI(TAG, "Attempting SD card mount at %u kHz (step %u/%u)", freq_steps[i], i+1, freq_count);
+        
+        // Clean up previous mount if exists
+        if (g_sd_ctx.card) {
+            esp_vfs_fat_sdcard_unmount(g_sd_ctx.mount_point, g_sd_ctx.card);
+            g_sd_ctx.card = NULL;
+        }
+        
+        // Attempt to mount filesystem at current frequency
+        ret = esp_vfs_fat_sdspi_mount(g_sd_ctx.mount_point, &host, &slot_config, 
+                                      &g_sd_ctx.mount_config, &g_sd_ctx.card);
+        
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card mounted successfully at %u kHz", freq_steps[i]);
+            mount_success = true;
+            working_freq = freq_steps[i];
+            // Continue trying higher frequencies - don't break here
         } else {
-            ESP_LOGE(TAG, "Failed to initialize the card (%s). "
-                     "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Failed to mount at %u kHz: %s", freq_steps[i], esp_err_to_name(ret));
+            
+            // If we had a working frequency before, revert to it
+            if (mount_success && working_freq > 0) {
+                ESP_LOGI(TAG, "Reverting to last working frequency: %u kHz", working_freq);
+                host.max_freq_khz = working_freq;
+                ret = esp_vfs_fat_sdspi_mount(g_sd_ctx.mount_point, &host, &slot_config, 
+                                              &g_sd_ctx.mount_config, &g_sd_ctx.card);
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "Successfully reverted to %u kHz", working_freq);
+                } else {
+                    ESP_LOGE(TAG, "Failed to revert to working frequency %u kHz", working_freq);
+                    mount_success = false;
+                }
+                break;
+            }
+        }
+    }
+    
+    if (!mount_success) {
+        ESP_LOGE(TAG, "Failed to mount SD card at any frequency. Final error: %s", esp_err_to_name(ret));
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Filesystem mount failed. Card may need formatting.");
+        } else {
+            ESP_LOGE(TAG, "Card initialization failed. Check connections and pull-up resistors.");
         }
         spi_bus_free(host.slot);
         return false;
@@ -157,15 +210,39 @@ bool at_sd_mount(const char *mount_point)
     
     g_sd_ctx.mounted = true;
     
-    // Print card info
+    // Print detailed card info with final operating frequency
     if (g_sd_ctx.card) {
-        ESP_LOGI(TAG, "SD card mounted successfully");
-        ESP_LOGI(TAG, "Name: %s", g_sd_ctx.card->cid.name);
-        ESP_LOGI(TAG, "Type: SD Card");
-        ESP_LOGI(TAG, "Speed: %s", (g_sd_ctx.card->csd.tr_speed > 25000000) ? "high speed" : "default speed");
-        ESP_LOGI(TAG, "Size: %lluMB", ((uint64_t) g_sd_ctx.card->csd.capacity) * g_sd_ctx.card->csd.sector_size / (1024 * 1024));
+        ESP_LOGI(TAG, "=== SD Card Mount Complete ===");
+        ESP_LOGI(TAG, "Final operating frequency: %u kHz", host.max_freq_khz);
+        ESP_LOGI(TAG, "Card name: %s", g_sd_ctx.card->cid.name);
+        ESP_LOGI(TAG, "Card type: SD Card");
+        ESP_LOGI(TAG, "Card speed class: %s", (g_sd_ctx.card->csd.tr_speed > 25000000) ? "High Speed" : "Default Speed");
+        
+        uint64_t card_size_mb = ((uint64_t) g_sd_ctx.card->csd.capacity) * g_sd_ctx.card->csd.sector_size / (1024 * 1024);
+        ESP_LOGI(TAG, "Card capacity: %llu MB (%.2f GB)", card_size_mb, card_size_mb / 1024.0);
+        ESP_LOGI(TAG, "Sector size: %u bytes", g_sd_ctx.card->csd.sector_size);
+        ESP_LOGI(TAG, "Mount point: %s", g_sd_ctx.mount_point);
+        ESP_LOGI(TAG, "============================");
+        
+        printf("SD Card Info:\n");
+        printf("  Name: %s\n", g_sd_ctx.card->cid.name);
+        printf("  Frequency: %u kHz\n", host.max_freq_khz);
+        printf("  Size: %llu MB\n", card_size_mb);
+        printf("  Mount: %s\n", g_sd_ctx.mount_point);
+        
+        // Performance indicator
+        if (host.max_freq_khz >= 32000) {
+            printf("  Performance: Excellent (≥32MHz)\n");
+        } else if (host.max_freq_khz >= 10000) {
+            printf("  Performance: Good (≥10MHz)\n");
+        } else if (host.max_freq_khz >= 1000) {
+            printf("  Performance: Fair (≥1MHz)\n");
+        } else {
+            printf("  Performance: Basic (<1MHz)\n");
+        }
     }
     
+    ESP_LOGI(TAG, "Adaptive frequency mount completed successfully");
     return true;
 }
 
@@ -183,6 +260,11 @@ bool at_sd_unmount(void)
     
     ESP_LOGI(TAG, "Unmounting SD card from %s", g_sd_ctx.mount_point);
     
+    // Log card info before unmount
+    if (g_sd_ctx.card) {
+        ESP_LOGI(TAG, "Unmounting card: %s", g_sd_ctx.card->cid.name);
+    }
+    
     // Get the host slot before unmounting
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     
@@ -193,6 +275,7 @@ bool at_sd_unmount(void)
     }
     
     // Free the SPI bus
+    ESP_LOGI(TAG, "Freeing SPI bus slot %d", host.slot);
     spi_bus_free(host.slot);
     
     g_sd_ctx.mounted = false;
@@ -383,7 +466,7 @@ bool at_sd_format(void)
     // Card must be mounted before formatting
     bool was_mounted = g_sd_ctx.mounted;
     if (!was_mounted) {
-        ESP_LOGI(TAG, "Mounting SD card before formatting");
+        ESP_LOGI(TAG, "Mounting SD card before formatting (adaptive frequency will be used)");
         if (!at_sd_mount(NULL)) {
             ESP_LOGE(TAG, "Failed to mount SD card before formatting");
             return false;
@@ -391,6 +474,9 @@ bool at_sd_format(void)
     }
     
     ESP_LOGI(TAG, "Starting SD card format operation");
+    if (g_sd_ctx.card) {
+        ESP_LOGI(TAG, "Formatting card: %s", g_sd_ctx.card->cid.name);
+    }
     
     // Use the existing mounted card and mount point
     esp_err_t ret = esp_vfs_fat_sdcard_format(g_sd_ctx.mount_point, g_sd_ctx.card);
