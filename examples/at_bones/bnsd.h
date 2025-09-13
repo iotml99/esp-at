@@ -4,24 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef AT_SD_H
-#define AT_SD_H
+#ifndef BNSD_H
+#define BNSD_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 // SD card configuration
-#define AT_SD_MOUNT_POINT           "/sdcard"
-#define AT_SD_MAX_PATH_LENGTH       256
-#define AT_SD_MAX_FILES             5
+#define BNSD_MOUNT_POINT           "/sdcard"
+#define BNSD_MAX_PATH_LENGTH       256
+#define BNSD_MAX_FILES             5
 
 // SD card status enumeration
 typedef enum {
-    AT_SD_STATUS_UNMOUNTED = 0,
-    AT_SD_STATUS_MOUNTED = 1,
-    AT_SD_STATUS_ERROR = 2
-} at_sd_status_t;
+    BNSD_STATUS_UNMOUNTED = 0,
+    BNSD_STATUS_MOUNTED = 1,
+    BNSD_STATUS_ERROR = 2
+} bnsd_status_t;
 
 // SD card information structure
 typedef struct {
@@ -30,19 +30,19 @@ typedef struct {
     uint64_t used_bytes;
     uint64_t free_bytes;
     char mount_point[32];
-} at_sd_info_t;
+} bnsd_info_t;
 
 /**
  * @brief Initialize SD card module
  * 
  * @return true on success, false on failure
  */
-bool at_sd_init(void);
+bool bnsd_init(void);
 
 /**
  * @brief Deinitialize SD card module
  */
-void at_sd_deinit(void);
+void bnsd_deinit(void);
 
 /**
  * @brief Mount SD card
@@ -50,28 +50,28 @@ void at_sd_deinit(void);
  * @param mount_point Mount point path (optional, uses default if NULL)
  * @return true on success, false on failure
  */
-bool at_sd_mount(const char *mount_point);
+bool bnsd_mount(const char *mount_point);
 
 /**
  * @brief Unmount SD card
  * 
  * @return true on success, false on failure
  */
-bool at_sd_unmount(void);
+bool bnsd_unmount(void);
 
 /**
  * @brief Check if SD card is mounted
  * 
  * @return true if mounted, false otherwise
  */
-bool at_sd_is_mounted(void);
+bool bnsd_is_mounted(void);
 
 /**
  * @brief Get SD card status
  * 
  * @return SD card status
  */
-at_sd_status_t at_sd_get_status(void);
+bnsd_status_t bnsd_get_status(void);
 
 /**
  * @brief Get SD card space information
@@ -79,7 +79,7 @@ at_sd_status_t at_sd_get_status(void);
  * @param info Pointer to info structure to fill
  * @return true on success, false on failure
  */
-bool at_sd_get_space_info(at_sd_info_t *info);
+bool bnsd_get_space_info(bnsd_info_t *info);
 
 /**
  * @brief Create directory recursively
@@ -87,20 +87,33 @@ bool at_sd_get_space_info(at_sd_info_t *info);
  * @param path Directory path to create
  * @return true on success, false on failure
  */
-bool at_sd_mkdir_recursive(const char *path);
+bool bnsd_mkdir_recursive(const char *path);
 
 /**
  * @brief Get current mount point
  * 
  * @return Mount point string or NULL if not mounted
  */
-const char *at_sd_get_mount_point(void);
+const char *bnsd_get_mount_point(void);
 
 /**
  * @brief Format SD card with FAT32 filesystem
  * 
  * @return true on success, false on failure
  */
-bool at_sd_format(void);
+bool bnsd_format(void);
 
-#endif /* AT_SD_H */
+/**
+ * @brief Normalize path by replacing @ prefix with mount point
+ * 
+ * This function transforms paths starting with @ or @/ into absolute paths
+ * using the SD card mount point. For example:
+ * - "@file.txt" becomes "/sdcard/file.txt"
+ * - "@/Downloads/file.txt" becomes "/sdcard/Downloads/file.txt"
+ * 
+ * @param path Path string to normalize (modified in place)
+ * @param max_length Maximum length of the path buffer
+ */
+void bnsd_normalize_path_with_mount_point(char *path, size_t max_length);
+
+#endif /* BNSD_H */

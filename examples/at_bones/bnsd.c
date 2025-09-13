@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "at_sd.h"
+#include "bnsd.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -46,7 +46,7 @@
 #define PIN_NUM_MISO  16
 #endif
 
-static const char *TAG = "AT_SD";
+static const char *TAG = "BNSD";
 
 // Global SD card context
 static struct {
@@ -57,7 +57,7 @@ static struct {
     esp_vfs_fat_sdmmc_mount_config_t mount_config;
 } g_sd_ctx = {0};
 
-bool at_sd_init(void)
+bool bnsd_init(void)
 {
     if (g_sd_ctx.initialized) {
         ESP_LOGI(TAG, "SD card module already initialized");
@@ -65,12 +65,12 @@ bool at_sd_init(void)
     }
     
     // Initialize mount point
-    strncpy(g_sd_ctx.mount_point, AT_SD_MOUNT_POINT, sizeof(g_sd_ctx.mount_point) - 1);
+    strncpy(g_sd_ctx.mount_point, BNSD_MOUNT_POINT, sizeof(g_sd_ctx.mount_point) - 1);
     g_sd_ctx.mount_point[sizeof(g_sd_ctx.mount_point) - 1] = '\0';
     
     // Configure mount options
     g_sd_ctx.mount_config.format_if_mount_failed = false;
-    g_sd_ctx.mount_config.max_files = AT_SD_MAX_FILES;
+    g_sd_ctx.mount_config.max_files = BNSD_MAX_FILES;
     g_sd_ctx.mount_config.allocation_unit_size = 16 * 1024;
     
     g_sd_ctx.initialized = true;
@@ -81,17 +81,17 @@ bool at_sd_init(void)
     return true;
 }
 
-void at_sd_deinit(void)
+void bnsd_deinit(void)
 {
     if (g_sd_ctx.mounted) {
-        at_sd_unmount();
+        bnsd_unmount();
     }
     
     memset(&g_sd_ctx, 0, sizeof(g_sd_ctx));
     ESP_LOGI(TAG, "SD card module deinitialized");
 }
 
-bool at_sd_mount(const char *mount_point)
+bool bnsd_mount(const char *mount_point)
 {
     if (!g_sd_ctx.initialized) {
         ESP_LOGE(TAG, "SD card module not initialized");
@@ -246,7 +246,7 @@ bool at_sd_mount(const char *mount_point)
     return true;
 }
 
-bool at_sd_unmount(void)
+bool bnsd_unmount(void)
 {
     if (!g_sd_ctx.initialized) {
         ESP_LOGE(TAG, "SD card module not initialized");
@@ -285,30 +285,30 @@ bool at_sd_unmount(void)
     return true;
 }
 
-bool at_sd_is_mounted(void)
+bool bnsd_is_mounted(void)
 {
     return g_sd_ctx.initialized && g_sd_ctx.mounted;
 }
 
-at_sd_status_t at_sd_get_status(void)
+bnsd_status_t bnsd_get_status(void)
 {
     if (!g_sd_ctx.initialized) {
-        return AT_SD_STATUS_ERROR;
+        return BNSD_STATUS_ERROR;
     }
     
-    return g_sd_ctx.mounted ? AT_SD_STATUS_MOUNTED : AT_SD_STATUS_UNMOUNTED;
+    return g_sd_ctx.mounted ? BNSD_STATUS_MOUNTED : BNSD_STATUS_UNMOUNTED;
 }
 
-bool at_sd_get_space_info(at_sd_info_t *info)
+bool bnsd_get_space_info(bnsd_info_t *info)
 {
     if (!info) {
         ESP_LOGE(TAG, "Invalid info parameter");
         return false;
     }
     
-    memset(info, 0, sizeof(at_sd_info_t));
+    memset(info, 0, sizeof(bnsd_info_t));
     
-    if (!at_sd_is_mounted()) {
+    if (!bnsd_is_mounted()) {
         ESP_LOGE(TAG, "SD card not mounted");
         return false;
     }
@@ -357,20 +357,20 @@ bool at_sd_get_space_info(at_sd_info_t *info)
     return true;
 }
 
-bool at_sd_mkdir_recursive(const char *path)
+bool bnsd_mkdir_recursive(const char *path)
 {
     if (!path) {
         ESP_LOGE(TAG, "Invalid path parameter");
         return false;
     }
     
-    if (!at_sd_is_mounted()) {
+    if (!bnsd_is_mounted()) {
         ESP_LOGE(TAG, "SD card not mounted");
         return false;
     }
     
-    char full_path[AT_SD_MAX_PATH_LENGTH];
-    char temp_path[AT_SD_MAX_PATH_LENGTH];
+    char full_path[BNSD_MAX_PATH_LENGTH];
+    char temp_path[BNSD_MAX_PATH_LENGTH];
     
     // Create full path
     if (path[0] == '/') {
@@ -413,7 +413,7 @@ bool at_sd_mkdir_recursive(const char *path)
         }
         
         // Reconstruct path up to current directory
-        char current_path[AT_SD_MAX_PATH_LENGTH];
+        char current_path[BNSD_MAX_PATH_LENGTH];
         if (next_slash) {
             size_t current_len = p - temp_path + strlen(p);
             strncpy(current_path, temp_path, current_len);
@@ -448,15 +448,15 @@ bool at_sd_mkdir_recursive(const char *path)
     return true;
 }
 
-const char *at_sd_get_mount_point(void)
+const char *bnsd_get_mount_point(void)
 {
-    if (at_sd_is_mounted()) {
+    if (bnsd_is_mounted()) {
         return g_sd_ctx.mount_point;
     }
     return NULL;
 }
 
-bool at_sd_format(void)
+bool bnsd_format(void)
 {
     if (!g_sd_ctx.initialized) {
         ESP_LOGE(TAG, "SD card module not initialized");
@@ -467,7 +467,7 @@ bool at_sd_format(void)
     bool was_mounted = g_sd_ctx.mounted;
     if (!was_mounted) {
         ESP_LOGI(TAG, "Mounting SD card before formatting (adaptive frequency will be used)");
-        if (!at_sd_mount(NULL)) {
+        if (!bnsd_mount(NULL)) {
             ESP_LOGE(TAG, "Failed to mount SD card before formatting");
             return false;
         }
@@ -490,11 +490,51 @@ bool at_sd_format(void)
     // If the card wasn't originally mounted, unmount it after formatting
     if (!was_mounted) {
         ESP_LOGI(TAG, "Unmounting SD card after format (was not originally mounted)");
-        if (!at_sd_unmount()) {
+        if (!bnsd_unmount()) {
             ESP_LOGW(TAG, "Warning: Failed to unmount SD card after format");
         }
     }
     
     ESP_LOGI(TAG, "SD card format operation completed successfully");
     return true;
+}
+
+void bnsd_normalize_path_with_mount_point(char *path, size_t max_length)
+{
+    if (!path || strlen(path) == 0) {
+        return;
+    }
+    
+    // Handle paths starting with @/ or @
+    if (path[0] == '@') {
+        char temp_path[BNSD_MAX_PATH_LENGTH + 1];
+        char *relative_path;
+        const char *mount_point;
+        
+        // Get current mount point (use mounted one or default)
+        mount_point = bnsd_get_mount_point();
+        if (!mount_point) {
+            mount_point = BNSD_MOUNT_POINT;  // Use default if not mounted
+        }
+        
+        // Skip the @ character
+        if (path[1] == '/') {
+            // @/Downloads -> /MOUNT_POINT/Downloads
+            relative_path = &path[2];
+        } else {
+            // @Downloads -> /MOUNT_POINT/Downloads
+            relative_path = &path[1];
+        }
+        
+        // Build the full path with mount point
+        int result = snprintf(temp_path, sizeof(temp_path), "%s/%s", 
+                             mount_point, relative_path);
+        
+        if (result >= 0 && result < sizeof(temp_path) && strlen(temp_path) <= max_length) {
+            strcpy(path, temp_path);
+            ESP_LOGI(TAG, "Normalized path with mount point: %s", path);
+        } else {
+            ESP_LOGE(TAG, "Path too long after mount point substitution");
+        }
+    }
 }

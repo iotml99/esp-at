@@ -13,7 +13,7 @@
 #include "bncurl.h"
 #include "bncurl_config.h"
 #include "bncurl_executor.h"
-#include "at_sd.h"
+#include "bnsd.h"
 #include "util.h"
 #include "bnwps.h"
 #include "bncert.h"
@@ -364,8 +364,8 @@ static uint8_t at_bnsd_mount_query(uint8_t *cmd_name)
 {
     uint8_t buffer[128] = {0};
     
-    if (at_sd_is_mounted()) {
-        const char *mount_point = at_sd_get_mount_point();
+    if (bnsd_is_mounted()) {
+        const char *mount_point = bnsd_get_mount_point();
         snprintf((char *)buffer, 128, "+BNSD_MOUNT:1,\"%s\"\r\n", mount_point ? mount_point : "/sdcard");
     } else {
         snprintf((char *)buffer, 128, "+BNSD_MOUNT:0\r\n");
@@ -389,13 +389,13 @@ static uint8_t at_bnsd_mount_setup(uint8_t para_num)
         }
     }
     
-    bool success = at_sd_mount((const char *)mount_point);
+    bool success = bnsd_mount((const char *)mount_point);
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
 static uint8_t at_bnsd_mount_exe(uint8_t *cmd_name)
 {
-    bool success = at_sd_mount(NULL);
+    bool success = bnsd_mount(NULL);
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
@@ -410,7 +410,7 @@ static uint8_t at_bnsd_unmount_test(uint8_t *cmd_name)
 static uint8_t at_bnsd_unmount_query(uint8_t *cmd_name)
 {
     uint8_t buffer[64] = {0};
-    at_sd_status_t status = at_sd_get_status();
+    bnsd_status_t status = bnsd_get_status();
     snprintf((char *)buffer, 64, "+BNSD_UNMOUNT:%d\r\n", (int)status);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
@@ -418,7 +418,7 @@ static uint8_t at_bnsd_unmount_query(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_unmount_exe(uint8_t *cmd_name)
 {
-    bool success = at_sd_unmount();
+    bool success = bnsd_unmount();
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
@@ -436,9 +436,9 @@ static uint8_t at_bnsd_space_test(uint8_t *cmd_name)
 static uint8_t at_bnsd_space_query(uint8_t *cmd_name)
 {
     uint8_t buffer[512] = {0};  // Increased buffer size for uint64 strings
-    at_sd_info_t info;
+    bnsd_info_t info;
     
-    if (!at_sd_get_space_info(&info)) {
+    if (!bnsd_get_space_info(&info)) {
         snprintf((char *)buffer, sizeof(buffer), "+BNSD_SPACE:ERROR\r\n");
     } else {
         // Convert uint64_t values to strings using util function
@@ -476,14 +476,14 @@ static uint8_t at_bnsd_format_query(uint8_t *cmd_name)
 {
     uint8_t buffer[64] = {0};
     snprintf((char *)buffer, 64, "+BNSD_FORMAT:%s\r\n", 
-             at_sd_is_mounted() ? "READY" : "NO_CARD");
+             bnsd_is_mounted() ? "READY" : "NO_CARD");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
 
 static uint8_t at_bnsd_format_exe(uint8_t *cmd_name)
 {
-    bool success = at_sd_format();
+    bool success = bnsd_format();
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
@@ -774,7 +774,23 @@ static uint8_t at_bncert_flash_setup(uint8_t para_num)
 // Web Radio command handlers
 static uint8_t at_bnweb_radio_test(uint8_t *cmd_name)
 {
-    esp_at_port_write_data((uint8_t *)"+BNWEB_RADIO:(0,1)\r\n", strlen("+BNWEB_RADIO:(0,1)\r\n"));
+    uint8_t buffer[512] = {0};
+    snprintf((char *)buffer, 512,
+        "+BNWEB_RADIO:<enable>[,<url>[,<file_path>]]\r\n"
+        "Control web radio streaming with optional SD card saving\r\n"
+        "\r\n"
+        "Parameters:\r\n"
+        "  <enable>      0=stop, 1=start streaming\r\n"
+        "  <url>         Radio stream URL (required when enable=1)\r\n"
+        "  <file_path>   Optional SD card file path to save stream\r\n"
+        "\r\n"
+        "Examples:\r\n"
+        "  AT+BNWEB_RADIO=1,\"http://stream.example.com:8000/radio\"\r\n"
+        "  AT+BNWEB_RADIO=1,\"http://stream.example.com:8000/radio\",\"/music/radio.mp3\"\r\n"
+        "  AT+BNWEB_RADIO=0\r\n"
+        "\r\n"
+        "Note: SD card must be mounted for file saving\r\n");
+    esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
 
@@ -784,10 +800,24 @@ static uint8_t at_bnweb_radio_query(uint8_t *cmd_name)
     size_t bytes_streamed = 0;
     uint32_t duration_ms = 0;
     
-    char response[128];
+    char response[256];
     if (bnwebradio_is_active() && bnwebradio_get_stats(&bytes_streamed, &duration_ms)) {
-        snprintf(response, sizeof(response), "+BNWEB_RADIO:1,%zu,%u\r\n", 
-                bytes_streamed, duration_ms);
+        // Get file saving context information
+        bool save_to_file = false;
+        char save_file_path[256] = {0};
+        
+        if (bnwebradio_get_context_info(&save_to_file, save_file_path, sizeof(save_file_path))) {
+            if (save_to_file) {
+                snprintf(response, sizeof(response), "+BNWEB_RADIO:1,%zu,%u,\"%s\"\r\n", 
+                        bytes_streamed, duration_ms, save_file_path);
+            } else {
+                snprintf(response, sizeof(response), "+BNWEB_RADIO:1,%zu,%u\r\n", 
+                        bytes_streamed, duration_ms);
+            }
+        } else {
+            snprintf(response, sizeof(response), "+BNWEB_RADIO:1,%zu,%u\r\n", 
+                    bytes_streamed, duration_ms);
+        }
     } else {
         snprintf(response, sizeof(response), "+BNWEB_RADIO:0\r\n");
     }
@@ -799,7 +829,13 @@ static uint8_t at_bnweb_radio_query(uint8_t *cmd_name)
 static uint8_t at_bnweb_radio_setup(uint8_t para_num)
 {
     uint8_t *url_param = NULL;
+    uint8_t *file_param = NULL;
     int32_t enable = 0;
+    
+    // Need at least 1 parameter (enable)
+    if (para_num < 1) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
     
     // Parse enable parameter (0 or 1)
     if (esp_at_get_para_as_digit(0, &enable) != ESP_AT_PARA_PARSE_RESULT_OK) {
@@ -814,6 +850,10 @@ static uint8_t at_bnweb_radio_setup(uint8_t para_num)
         return ESP_AT_RESULT_CODE_OK;
     } else if (enable == 1) {
         // Start web radio - need URL parameter
+        if (para_num < 2) {
+            return ESP_AT_RESULT_CODE_ERROR;
+        }
+        
         if (esp_at_get_para_as_str(1, &url_param) != ESP_AT_PARA_PARSE_RESULT_OK) {
             return ESP_AT_RESULT_CODE_ERROR;
         }
@@ -823,8 +863,33 @@ static uint8_t at_bnweb_radio_setup(uint8_t para_num)
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
-        // Start web radio streaming
-        if (!bnwebradio_start((char *)url_param)) {
+        // Check for optional file parameter
+        if (para_num >= 3) {
+            if (esp_at_get_para_as_str(2, &file_param) == ESP_AT_PARA_PARSE_RESULT_OK) {
+                // Handle file path parameter
+                if (!file_param || strlen((char *)file_param) == 0) {
+                    file_param = NULL; // Ignore empty file parameter
+                } else {
+                    // Use bnsd_normalize_path_with_mount_point to handle @ prefix and path normalization
+                    static char normalized_path[256]; // Static buffer for normalized path
+                    
+                    // Copy the input path to our buffer first
+                    strncpy(normalized_path, (char *)file_param, sizeof(normalized_path) - 1);
+                    normalized_path[sizeof(normalized_path) - 1] = '\0';
+                    
+                    // Normalize the path in-place
+                    bnsd_normalize_path_with_mount_point(normalized_path, sizeof(normalized_path));
+                    
+                    // Update file_param to point to the normalized path
+                    file_param = (uint8_t *)normalized_path;
+                }
+            } else {
+                file_param = NULL;
+            }
+        }
+        
+        // Start web radio streaming with optional file saving
+        if (!bnwebradio_start((char *)url_param, (char *)file_param)) {
             return ESP_AT_RESULT_CODE_ERROR;
         }
         
@@ -925,7 +990,7 @@ bool esp_at_custom_cmd_register(void)
     }
     
     // Initialize SD card module
-    if (!at_sd_init()) {
+    if (!bnsd_init()) {
         bncurl_executor_deinit();
         return false;
     }

@@ -5,7 +5,7 @@
  */
 
 #include "bncurl_cookies.h"
-#include "at_sd.h"
+#include "bnsd.h"
 #include "esp_at.h"
 #include "esp_log.h"
 #include <stdio.h>
@@ -322,7 +322,7 @@ bool bncurl_cookies_validate_file_path(const char *cookie_file_path)
     
     // Check if this is an SD card path
     if (strncmp(cookie_file_path, "/sdcard", 7) == 0) {
-        if (!at_sd_is_mounted()) {
+        if (!bnsd_is_mounted()) {
             ESP_LOGE(TAG, "SD card must be mounted to save cookies to: %s", cookie_file_path);
             return false;
         }
@@ -339,7 +339,7 @@ bool bncurl_cookies_validate_file_path(const char *cookie_file_path)
         *last_slash = '\0'; // Terminate string at last slash to get directory path
         
         // Create directory if needed
-        if (!at_sd_mkdir_recursive(dir_path)) {
+        if (!bnsd_mkdir_recursive(dir_path)) {
             ESP_LOGE(TAG, "Failed to create directory for cookie file: %s", cookie_file_path);
             return false;
         }

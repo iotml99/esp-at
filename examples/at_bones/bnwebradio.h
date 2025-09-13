@@ -31,6 +31,10 @@ typedef struct {
     uint32_t start_time;             // Stream start timestamp
     void *curl_handle;               // CURL handle for streaming
     bool stop_requested;             // Stop flag for graceful shutdown
+    char save_file_path[256];        // SD card file path to save stream
+    bool save_to_file;               // Flag to enable file saving
+    void *file_handle;               // FILE* handle for saving
+    uint32_t write_count;            // Counter for periodic file flushing
 } bnwebradio_context_t;
 
 /**
@@ -47,9 +51,10 @@ void bnwebradio_deinit(void);
 /**
  * @brief Start web radio streaming
  * @param url Radio stream URL
+ * @param save_file_path Optional SD card file path to save stream (NULL for streaming only)
  * @return true on success, false on failure
  */
-bool bnwebradio_start(const char *url);
+bool bnwebradio_start(const char *url, const char *save_file_path);
 
 /**
  * @brief Stop web radio streaming
@@ -76,6 +81,15 @@ bool bnwebradio_get_stats(size_t *bytes_streamed, uint32_t *duration_ms);
  * @return true if streaming, false otherwise
  */
 bool bnwebradio_is_active(void);
+
+/**
+ * @brief Get webradio context information (for AT command queries)
+ * @param save_to_file Output: whether saving to file is enabled
+ * @param save_file_path Output: file path being saved to (if save_to_file is true)
+ * @param path_buffer_size Size of the save_file_path buffer
+ * @return true if context retrieved successfully, false otherwise
+ */
+bool bnwebradio_get_context_info(bool *save_to_file, char *save_file_path, size_t path_buffer_size);
 
 #ifdef __cplusplus
 }

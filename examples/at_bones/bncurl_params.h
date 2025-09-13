@@ -92,16 +92,7 @@ uint8_t bncurl_parse_and_print_params(uint8_t para_num, bncurl_params_t *params)
  */
 void bncurl_params_cleanup(bncurl_params_t *params);
 
-/**
- * @brief Normalize file path with mount point substitution
- * 
- * This function normalizes file paths by replacing "@" prefix with the
- * actual mount point path (e.g., "@/file" becomes "/sdcard/file").
- * 
- * @param path File path to normalize (modified in place)
- * @param max_length Maximum length of the path buffer
- */
-void normalize_path_with_mount_point(char *path, size_t max_length);
+
 
 /**
  * @brief Get the configured URL from BNURLCFG command

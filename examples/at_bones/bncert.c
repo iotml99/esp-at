@@ -7,6 +7,7 @@
 #include "bncert.h"
 #include "bncert_manager.h"
 #include "bncurl_params.h"
+#include "bnsd.h"
 #include "esp_flash.h"
 #include "esp_partition.h"
 #include "esp_log.h"
@@ -168,7 +169,7 @@ uint8_t bncert_parse_params(uint8_t para_num, bncert_params_t *params)
             params->file_path[BNCERT_MAX_FILE_PATH_LENGTH] = '\0';
             
             // Normalize the file path (remove @ and prepend mount point)
-            normalize_path_with_mount_point(params->file_path, BNCERT_MAX_FILE_PATH_LENGTH);
+            bnsd_normalize_path_with_mount_point(params->file_path, BNCERT_MAX_FILE_PATH_LENGTH);
             
             ESP_LOGI(TAG, "Certificate source: file %s", params->file_path);
         } else {

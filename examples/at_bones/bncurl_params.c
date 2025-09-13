@@ -15,7 +15,7 @@
 #include "esp_at.h"
 #include "esp_log.h"
 #include "bncurl_params.h"
-#include "at_sd.h"
+#include "bnsd.h"
 
 static const char *TAG = "BNCURL_PARAMS";
 
@@ -175,8 +175,8 @@ static bool validate_and_prepare_download_path(const char *file_path)
     if (last_slash != NULL) {
         *last_slash = '\0'; // Terminate string at last slash to get directory path
         
-        // Use at_sd_mkdir_recursive to create directory
-        if (!at_sd_mkdir_recursive(dir_path)) {
+        // Use bnsd_mkdir_recursive to create directory
+        if (!bnsd_mkdir_recursive(dir_path)) {
             ESP_LOGE(TAG, "Failed to create directory for file: %s", file_path);
             printf("ERROR: Failed to create directory for file: %s\n", file_path);
             return false;
@@ -214,22 +214,22 @@ static bool validate_and_prepare_sd_file_operations(const bncurl_params_t *param
     bool has_sd_file_paths = false;
     
     // Check if any SD card file paths are specified
-    if (strlen(params->data_download) > 0 && strncmp(params->data_download, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->data_download) > 0 && strncmp(params->data_download, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         has_sd_file_paths = true;
     }
-    if (strlen(params->data_upload) > 0 && strncmp(params->data_upload, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->data_upload) > 0 && strncmp(params->data_upload, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         has_sd_file_paths = true;
     }
-    if (strlen(params->cookie_save) > 0 && strncmp(params->cookie_save, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->cookie_save) > 0 && strncmp(params->cookie_save, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         has_sd_file_paths = true;
     }
-    if (strlen(params->cookie_send) > 0 && strncmp(params->cookie_send, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->cookie_send) > 0 && strncmp(params->cookie_send, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         has_sd_file_paths = true;
     }
     
     // If SD card file paths are specified, SD card must be mounted
     if (has_sd_file_paths) {
-        if (!at_sd_is_mounted()) {
+        if (!bnsd_is_mounted()) {
             ESP_LOGE(TAG, "SD card is not mounted but file paths are specified");
             printf("ERROR: SD card must be mounted to use @ file paths\n");
             return false;
@@ -241,28 +241,28 @@ static bool validate_and_prepare_sd_file_operations(const bncurl_params_t *param
     }
     
     // Validate and prepare download file path if specified
-    if (strlen(params->data_download) > 0 && strncmp(params->data_download, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->data_download) > 0 && strncmp(params->data_download, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         if (!validate_and_prepare_download_path(params->data_download)) {
             return false;
         }
     }
     
     // Validate and prepare cookie save file path if specified
-    if (strlen(params->cookie_save) > 0 && strncmp(params->cookie_save, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->cookie_save) > 0 && strncmp(params->cookie_save, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         if (!validate_and_prepare_download_path(params->cookie_save)) {
             return false;
         }
     }
     
     // Validate cookie send file exists if specified
-    if (strlen(params->cookie_send) > 0 && strncmp(params->cookie_send, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->cookie_send) > 0 && strncmp(params->cookie_send, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         if (!validate_file_exists_for_reading(params->cookie_send)) {
             return false;
         }
     }
     
     // Validate data upload file exists if it's a file path (starts with mount point)
-    if (strlen(params->data_upload) > 0 && strncmp(params->data_upload, BNCURL_SD_MOUNT_POINT, strlen(BNCURL_SD_MOUNT_POINT)) == 0) {
+    if (strlen(params->data_upload) > 0 && strncmp(params->data_upload, BNSD_MOUNT_POINT, strlen(BNSD_MOUNT_POINT)) == 0) {
         if (!validate_file_exists_for_reading(params->data_upload)) {
             return false;
         }
@@ -271,41 +271,7 @@ static bool validate_and_prepare_sd_file_operations(const bncurl_params_t *param
     return true;
 }
 
-// Function to normalize path by replacing @ prefix with mount point
-void normalize_path_with_mount_point(char *path, size_t max_length)
-{
-    if (!path || strlen(path) == 0) {
-        return;
-    }
-    
-    // Handle paths starting with @/ or @
-    if (path[0] == '@') {
-        char temp_path[BNCURL_MAX_FILE_PATH_LENGTH + 1];
-        char *relative_path;
-        
-        // Skip the @ character
-        if (path[1] == '/') {
-            // @/Downloads -> /MOUNT_POINT/Downloads
-            relative_path = &path[2];
-        } else {
-            // @Downloads -> /MOUNT_POINT/Downloads
-            relative_path = &path[1];
-        }
-        
-        // Build the full path with mount point
-        int result = snprintf(temp_path, sizeof(temp_path), "%s/%s", 
-                             BNCURL_SD_MOUNT_POINT, relative_path);
-        
-        if (result >= 0 && result < sizeof(temp_path) && strlen(temp_path) <= max_length) {
-            strcpy(path, temp_path);
-            ESP_LOGI(TAG, "Normalized path with mount point: %s", path);
-            printf("INFO: Normalized path with mount point: %s\n", path);
-        } else {
-            ESP_LOGE(TAG, "Path too long after mount point substitution");
-            printf("ERROR: Path too long after mount point substitution\n");
-        }
-    }
-}
+
 
 // Function to validate parameter combinations
 static bool validate_param_combinations(const bncurl_params_t *params)
@@ -503,7 +469,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
                 
                 // File path - normalize it
                 params->is_numeric_upload = false;
-                normalize_path_with_mount_point(params->data_upload, BNCURL_MAX_PARAMETER_LENGTH);
+                bnsd_normalize_path_with_mount_point(params->data_upload, BNCURL_MAX_PARAMETER_LENGTH);
             }
             
         } else if (strcmp(option, "-dd") == 0) {
@@ -539,7 +505,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             params->data_download[BNCURL_MAX_FILE_PATH_LENGTH] = '\0';
             
             // Normalize path (remove @ and prepend mount point)
-            normalize_path_with_mount_point(params->data_download, BNCURL_MAX_FILE_PATH_LENGTH);
+            bnsd_normalize_path_with_mount_point(params->data_download, BNCURL_MAX_FILE_PATH_LENGTH);
             
         } else if (strcmp(option, "-c") == 0) {
             // Cookie save option
@@ -572,7 +538,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             params->cookie_save[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
             // Normalize path (remove @ and prepend mount point)
-            normalize_path_with_mount_point(params->cookie_save, BNCURL_MAX_COOKIE_FILE_PATH);
+            bnsd_normalize_path_with_mount_point(params->cookie_save, BNCURL_MAX_COOKIE_FILE_PATH);
             
         } else if (strcmp(option, "-b") == 0) {
             // Cookie send option
@@ -605,7 +571,7 @@ static uint8_t parse_bncurl_params(uint8_t para_num, bncurl_params_t *params)
             params->cookie_send[BNCURL_MAX_COOKIE_FILE_PATH] = '\0';
             
             // Normalize path (remove @ and prepend mount point)
-            normalize_path_with_mount_point(params->cookie_send, BNCURL_MAX_COOKIE_FILE_PATH);
+            bnsd_normalize_path_with_mount_point(params->cookie_send, BNCURL_MAX_COOKIE_FILE_PATH);
             
         } else if (strcmp(option, "-r") == 0) {
             // Range option

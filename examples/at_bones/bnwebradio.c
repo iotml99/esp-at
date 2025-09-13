@@ -7,7 +7,9 @@
 #include "curl/curl.h"
 #include "esp_at.h"
 #include "bncert_manager.h"
+#include "bnsd.h"
 #include <string.h>
+#include <stdio.h>
 
 static const char *TAG = "BNWEBRADIO";
 
@@ -39,6 +41,8 @@ bool bnwebradio_init(void)
     // Initialize context
     memset(&g_webradio_ctx, 0, sizeof(bnwebradio_context_t));
     g_webradio_ctx.state = WEBRADIO_STATE_IDLE;
+    g_webradio_ctx.save_to_file = false;
+    g_webradio_ctx.file_handle = NULL;
 
     ESP_LOGI(TAG, "Web radio module initialized");
     return true;
@@ -58,7 +62,7 @@ void bnwebradio_deinit(void)
     ESP_LOGI(TAG, "Web radio module deinitialized");
 }
 
-bool bnwebradio_start(const char *url)
+bool bnwebradio_start(const char *url, const char *save_file_path)
 {
     if (!url || strlen(url) == 0) {
         ESP_LOGE(TAG, "Invalid URL provided");
@@ -86,19 +90,52 @@ bool bnwebradio_start(const char *url)
     g_webradio_ctx.bytes_streamed = 0;
     g_webradio_ctx.start_time = esp_timer_get_time() / 1000; // Convert to milliseconds
     g_webradio_ctx.stop_requested = false;
+    g_webradio_ctx.file_handle = NULL;
+    g_webradio_ctx.write_count = 0;
+
+    // Handle file saving configuration
+    if (save_file_path && strlen(save_file_path) > 0) {
+        // Check if SD card is mounted
+        if (!bnsd_is_mounted()) {
+            ESP_LOGE(TAG, "SD card not mounted, cannot save to file");
+            xSemaphoreGive(g_webradio_mutex);
+            return false;
+        }
+        
+        strncpy(g_webradio_ctx.save_file_path, save_file_path, sizeof(g_webradio_ctx.save_file_path) - 1);
+        g_webradio_ctx.save_file_path[sizeof(g_webradio_ctx.save_file_path) - 1] = '\0';
+        g_webradio_ctx.save_to_file = true;
+        ESP_LOGI(TAG, "Will save stream to file: %s", save_file_path);
+    } else {
+        g_webradio_ctx.save_to_file = false;
+        ESP_LOGI(TAG, "Streaming only mode (no file saving)");
+    }
 
     // Create streaming task
     BaseType_t ret = xTaskCreate(webradio_task, "webradio_task", 8192, NULL, 5, &g_webradio_task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create webradio task");
+        
+        // Close file if it was opened
+        if (g_webradio_ctx.file_handle) {
+            fclose((FILE*)g_webradio_ctx.file_handle);
+            g_webradio_ctx.file_handle = NULL;
+        }
+        
         g_webradio_ctx.is_active = false;
         g_webradio_ctx.state = WEBRADIO_STATE_ERROR;
+        g_webradio_ctx.save_to_file = false;
         xSemaphoreGive(g_webradio_mutex);
         return false;
     }
 
     xSemaphoreGive(g_webradio_mutex);
-    ESP_LOGI(TAG, "Web radio streaming started for URL: %s", url);
+    
+    if (g_webradio_ctx.save_to_file) {
+        ESP_LOGI(TAG, "Web radio streaming started for URL: %s, saving to: %s", url, save_file_path);
+    } else {
+        ESP_LOGI(TAG, "Web radio streaming started for URL: %s", url);
+    }
     return true;
 }
 
@@ -142,8 +179,22 @@ bool bnwebradio_stop(void)
     }
 
     xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+    
+    // Close file if it was open
+    if (g_webradio_ctx.file_handle) {
+        // Final flush to ensure all data is written
+        fflush((FILE*)g_webradio_ctx.file_handle);
+        fclose((FILE*)g_webradio_ctx.file_handle);
+        g_webradio_ctx.file_handle = NULL;
+        if (g_webradio_ctx.save_to_file) {
+            ESP_LOGI(TAG, "Closed file: %s", g_webradio_ctx.save_file_path);
+        }
+    }
+    
     g_webradio_ctx.is_active = false;
     g_webradio_ctx.state = WEBRADIO_STATE_IDLE;
+    g_webradio_ctx.save_to_file = false;
+    
     xSemaphoreGive(g_webradio_mutex);
 
     ESP_LOGI(TAG, "Web radio streaming stopped");
@@ -197,6 +248,32 @@ bool bnwebradio_is_active(void)
     return active;
 }
 
+bool bnwebradio_get_context_info(bool *save_to_file, char *save_file_path, size_t path_buffer_size)
+{
+    if (!save_to_file || !save_file_path || path_buffer_size == 0 || g_webradio_mutex == NULL) {
+        return false;
+    }
+
+    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+    
+    if (!g_webradio_ctx.is_active) {
+        xSemaphoreGive(g_webradio_mutex);
+        return false;
+    }
+
+    *save_to_file = g_webradio_ctx.save_to_file;
+    
+    if (g_webradio_ctx.save_to_file) {
+        strncpy(save_file_path, g_webradio_ctx.save_file_path, path_buffer_size - 1);
+        save_file_path[path_buffer_size - 1] = '\0';
+    } else {
+        save_file_path[0] = '\0';
+    }
+
+    xSemaphoreGive(g_webradio_mutex);
+    return true;
+}
+
 static void webradio_task(void *pvParameters)
 {
     CURL *curl = NULL;
@@ -211,9 +288,21 @@ static void webradio_task(void *pvParameters)
         goto task_cleanup;
     }
 
-    // Store curl handle in context
+    // Store curl handle in context and open file if needed
     xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
     g_webradio_ctx.curl_handle = curl;
+    
+    // Open file for writing if file saving is enabled
+    if (g_webradio_ctx.save_to_file) {
+        g_webradio_ctx.file_handle = fopen(g_webradio_ctx.save_file_path, "wb");
+        if (!g_webradio_ctx.file_handle) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", g_webradio_ctx.save_file_path);
+            xSemaphoreGive(g_webradio_mutex);
+            goto task_cleanup;
+        }
+        ESP_LOGI(TAG, "Opened file for writing: %s", g_webradio_ctx.save_file_path);
+    }
+    
     xSemaphoreGive(g_webradio_mutex);
 
     // Configure CURL for streaming
@@ -294,9 +383,19 @@ task_cleanup:
         curl_easy_cleanup(curl);
     }
 
-    // Update context
+    // Update context and close file
     xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
     g_webradio_ctx.curl_handle = NULL;
+    
+    // Close file if it was opened
+    if (g_webradio_ctx.file_handle) {
+        // Final flush to ensure all data is written
+        fflush((FILE*)g_webradio_ctx.file_handle);
+        fclose((FILE*)g_webradio_ctx.file_handle);
+        g_webradio_ctx.file_handle = NULL;
+        ESP_LOGI(TAG, "Closed file: %s", g_webradio_ctx.save_file_path);
+    }
+    
     g_webradio_ctx.is_active = false;
     if (g_webradio_ctx.state != WEBRADIO_STATE_ERROR) {
         g_webradio_ctx.state = WEBRADIO_STATE_IDLE;
@@ -314,25 +413,46 @@ static size_t webradio_write_callback(void *contents, size_t size, size_t nmemb,
 {
     size_t total_size = size * nmemb;
     
-    // Check if stop was requested
-    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
-    bool stop_requested = g_webradio_ctx.stop_requested;
-    xSemaphoreGive(g_webradio_mutex);
+    if (total_size == 0) {
+        return 0;
+    }
     
-    if (stop_requested) {
+    // Take mutex once and hold for the entire operation to minimize timing issues
+    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+    
+    // Check if stop was requested
+    if (g_webradio_ctx.stop_requested) {
         ESP_LOGI(TAG, "Stop requested, terminating stream");
+        xSemaphoreGive(g_webradio_mutex);
         return 0; // This will cause CURL to abort
     }
 
-    // Stream raw audio data directly to UART
-    if (total_size > 0) {
-        esp_at_port_write_data((uint8_t *)contents, total_size);
-        
-        // Update statistics
-        xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
-        g_webradio_ctx.bytes_streamed += total_size;
-        xSemaphoreGive(g_webradio_mutex);
+    bool file_write_success = true;
+    
+    // Save to file if enabled
+    if (g_webradio_ctx.save_to_file && g_webradio_ctx.file_handle) {
+        size_t written = fwrite(contents, 1, total_size, (FILE*)g_webradio_ctx.file_handle);
+        if (written != total_size) {
+            ESP_LOGE(TAG, "File write error: expected %zu bytes, wrote %zu bytes", total_size, written);
+            file_write_success = false;
+            // Don't abort - continue with UART streaming even if file write fails
+        } else {
+            // Increment write counter and flush periodically (every 100 writes)
+            g_webradio_ctx.write_count++;
+            if (g_webradio_ctx.write_count >= 100) {
+                fflush((FILE*)g_webradio_ctx.file_handle);
+                g_webradio_ctx.write_count = 0;
+            }
+        }
     }
+    
+    // Update statistics
+    g_webradio_ctx.bytes_streamed += total_size;
+    
+    xSemaphoreGive(g_webradio_mutex);
+    
+    // Stream to UART (always done for feedback) - do this outside mutex to avoid blocking
+    esp_at_port_write_data((uint8_t *)contents, total_size);
 
     return total_size;
 }
