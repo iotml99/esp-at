@@ -97,10 +97,10 @@ Your device confirms it's talking to the real weather service and encrypts all c
 
 ### Security Benefits
 
-✅ **Data Protection**: All communication is encrypted
-✅ **Identity Verification**: Confirms you're talking to the right server
-✅ **Integrity Checking**: Detects if data has been tampered with
-✅ **Trust Establishment**: Creates a secure foundation for communication
+- **Data Protection**: All communication is encrypted
+- **Identity Verification**: Confirms you're talking to the right server
+- **Integrity Checking**: Detects if data has been tampered with
+- **Trust Establishment**: Creates a secure foundation for communication
 
 ### When You Don't Need This Guide
 
@@ -121,7 +121,7 @@ This guide will walk you through the technical steps, but remember: you're essen
 
 ## Quick Start with Python Script
 
-**⚡ For a faster automated approach**, use the included Python script:
+**For a faster automated approach**, use the included Python script:
 
 ```bash
 # Generate important CA certificates automatically
@@ -242,7 +242,7 @@ AT+BNCURL="GET","https://api.openweathermap.org/data/2.5/weather?lat=42.567001&l
 
 Expected successful response:
 ```
-{"coord":{"lon":1.5981,"lat":42.567},"weather":[{"id":501,"main":"Rain","description":"orta şiddetli yağmur","icon":"10d"}],"base":"stations","main":{"temp":20.04,"feels_like":19.95,"temp_min":20.04,"temp_max":26.98,"pressure":1025,"humidity":71,"sea_level":1025,"grnd_level":816},"visibility":10000,"wind":{"speed":1.02,"deg":348,"gust":2.37},"rain":{"1h":2.37},"clouds":{"all":100},"dt":1751548805,"sys":{"type":2,"id":19636,"country":"AD","sunrise":1751516448,"sunset":1571273},"timezone":7200,"id":3041204,"name":"Canillo","cod":200}
+{"coord":{"lon":1.5981,"lat":42.567},"weather":[{"id":804,"main":"Clouds","description":"kapalı","icon":"04d"}],"base":"stations","main":{"temp":12.59,"feels_like":11.89,"temp_min":12.59,"temp_max":15.04,"pressure":1025,"humidity":76,"sea_level":1025,"grnd_level":815},"visibility":10000,"wind":{"speed":1.77,"deg":21,"gust":2.36},"clouds":{"all":99},"dt":1758087729,"sys":{"type":2,"id":2099214,"country":"AD","sunrise":1758087337,"sunset":1758132046},"timezone":7200,"id":3041204,"name":"Canillo","cod":200}
 ```
 
 ## Method 2: Complete Certificate Chain Extraction
@@ -289,140 +289,71 @@ Expected response for multiple certificates:
 OK
 ```
 
-## Method 3: Individual Certificates from System Root CA Bundle
+## Method 3: Individual Certificates from System Root CA Bundle (Automated)
 
-For maximum compatibility, extract individual certificates from the system root CA bundle. Each certificate must be under 4KB to fit in a single flash sector:
+For maximum compatibility, use the included Python script to automatically extract and prepare individual certificates from the system root CA bundle. This method intelligently selects important Certificate Authorities and handles all the complex processing automatically.
 
-### Step 1: Extract System CA Bundle
+### Step 1: Use the Certificate Generator Script
+
+Instead of manually processing hundreds of certificates, use the automated script:
 
 ```bash
-# On Windows with Git Bash, find and extract system CA bundle
+# Find your system's CA bundle location
 openssl version -d
 # Note the OpenSSL directory (usually /usr/ssl or /mingw64/ssl)
 
-# Copy system CA bundle
-cp /usr/ssl/cert.pem system_ca_bundle.pem
+# Run the certificate generator script with your CA bundle path
+python generate_ca_certificates.py --bundle /usr/ssl/cert.pem
 
-# Alternative locations if above doesn't exist:
-# cp /mingw64/ssl/cert.pem system_ca_bundle.pem
-# cp /etc/ssl/cert.pem system_ca_bundle.pem
+# Alternative bundle locations if above doesn't exist:
+# python generate_ca_certificates.py --bundle /mingw64/ssl/cert.pem
+# python generate_ca_certificates.py --bundle /etc/ssl/cert.pem
 ```
 
-### Step 2: Split Bundle into Individual Certificates
+The script will automatically:
+- Extract individual certificates from the system bundle
+- Filter for important Certificate Authorities (DigiCert, Let's Encrypt, etc.)
+- Verify each certificate is under 4KB (ESP32 requirement)
+- Generate properly named certificate files
+- Create AT commands for flashing
 
-The system CA bundle contains hundreds of individual certificates. Split them into separate files:
+### Step 2: Copy Generated Certificates to SD Card
 
 ```bash
-# Create directory for individual certificates
-mkdir -p individual_certs
-
-# Split the bundle into individual certificate files
-awk '
-BEGIN { cert_count = 0; in_cert = 0 }
-/-----BEGIN CERTIFICATE-----/ { 
-    in_cert = 1; 
-    cert_count++; 
-    filename = "individual_certs/ca_cert_" sprintf("%03d", cert_count) ".pem" 
-}
-in_cert { print > filename }
-/-----END CERTIFICATE-----/ { in_cert = 0; close(filename) }
-' system_ca_bundle.pem
-
-echo "Extracted $cert_count individual certificates"
+# Copy all generated certificates to SD card
+cp sd_card_certs/*.pem /path/to/sd/card/certs/
 ```
 
-### Step 3: Verify Certificate Sizes
+### Step 3: Flash Certificates Using Generated Commands
 
-Ensure each certificate is under 4KB (4096 bytes):
+Use the automatically generated AT commands:
 
 ```bash
-# Check sizes of all extracted certificates
-for cert in individual_certs/*.pem; do
-    size=$(wc -c < "$cert")
-    if [ $size -gt 4096 ]; then
-        echo "WARNING: $cert is $size bytes (exceeds 4KB limit)"
-    else
-        echo "$cert: $size bytes (OK)"
-    fi
-done
-
-# Count certificates under 4KB
-valid_certs=$(find individual_certs -name "*.pem" -exec wc -c {} + | awk '$1 <= 4096 {count++} END {print count+0}')
-echo "Found $valid_certs certificates under 4KB limit"
+# Execute the commands from the generated file
+cat sd_card_certs/flash_commands.txt
 ```
 
-### Step 4: Select and Flash Relevant Certificates
+Example output:
+```
+AT+BNFLASH_CERT=0x380000,@/certs/DigiCert_Global_Root_CA.pem
+AT+BNFLASH_CERT=0x381000,@/certs/ISRG_Root_X1.pem
+AT+BNFLASH_CERT=0x382000,@/certs/Amazon_Root_CA_1.pem
+# ... additional certificates
+```
 
-Instead of flashing all certificates, select only those relevant to your target servers:
+### Step 4: Verify Installation
+
+Check the generated summary and verify certificates are flashed:
 
 ```bash
-# Method A: Flash certificates for specific issuers (recommended)
-# Find certificates from major CAs used by common services
-grep -l "DigiCert\|Let's Encrypt\|GeoTrust\|Verisign\|Comodo" individual_certs/*.pem
+# Review the generated summary
+cat sd_card_certs/certificate_summary.txt
 
-# Method B: Flash certificates by examining target server's chain
-echo | openssl s_client -showcerts -servername api.openweathermap.org -connect api.openweathermap.org:443 2>/dev/null | openssl x509 -issuer -noout
-# Use the issuer information to find the matching certificate from individual_certs/
-
-# Method C: Flash first 64 certificates (maximum partition capacity)
-# Each certificate uses one 4KB sector, partition has 64 sectors total
+# Verify certificates are registered on ESP32
+AT+BNCERT_LIST?
 ```
 
-### Step 5: Flash Selected Certificates
-
-Flash individual certificates to 4KB-aligned addresses:
-
-```bash
-# Example: Flash first 10 certificates for testing
-cert_files=(individual_certs/ca_cert_001.pem individual_certs/ca_cert_002.pem individual_certs/ca_cert_003.pem individual_certs/ca_cert_004.pem individual_certs/ca_cert_005.pem individual_certs/ca_cert_006.pem individual_certs/ca_cert_007.pem individual_certs/ca_cert_008.pem individual_certs/ca_cert_009.pem individual_certs/ca_cert_010.pem)
-
-base_addr=0x380000
-for i in "${!cert_files[@]}"; do
-    cert_file="${cert_files[$i]}"
-    address=$(printf "0x%X" $((base_addr + i * 0x1000)))
-    echo "Flashing $(basename "$cert_file") to address $address"
-    # Copy to SD card
-    cp "$cert_file" "/path/to/sd/card/certs/"
-    # Flash command
-    echo "AT+BNFLASH_CERT=$address,@/certs/$(basename "$cert_file")"
-done
-```
-
-### Step 6: Smart Certificate Selection
-
-For optimal compatibility, select certificates based on common web services:
-
-```bash
-# Create a list of important CA certificates by issuer
-important_cas=(
-    "DigiCert High Assurance EV Root CA"
-    "DigiCert Global Root CA"
-    "Let's Encrypt Authority X3"
-    "GeoTrust Global CA"
-    "VeriSign Class 3 Public Primary Certification Authority"
-    "Comodo CA Limited"
-    "Baltimore CyberTrust Root"
-    "AddTrust External CA Root"
-)
-
-# Find and extract these specific certificates
-for ca in "${important_cas[@]}"; do
-    echo "Looking for: $ca"
-    grep -l "$ca" individual_certs/*.pem | head -1
-done > selected_certificates.txt
-
-# Flash the selected certificates
-addr=0x380000
-while IFS= read -r cert_file; do
-    if [ -f "$cert_file" ]; then
-        size=$(wc -c < "$cert_file")
-        echo "Flashing $(basename "$cert_file") ($size bytes) to $addr"
-        cp "$cert_file" "/path/to/sd/card/certs/"
-        echo "AT+BNFLASH_CERT=$addr,@/certs/$(basename "$cert_file")"
-        addr=$(printf "0x%X" $((addr + 0x1000)))
-    fi
-done < selected_certificates.txt
-```
+**For detailed script options and troubleshooting, see `CERTIFICATE_GENERATOR_README.md`.**
 
 ## Certificate Management Commands
 
@@ -513,126 +444,6 @@ I (xxxxx) BNCURL_COMMON: Using hardcoded CA bundle for SSL verification
    I (xxxxx) BNCERT_MGR: Loaded certificate from 0x00380000 (xxxx bytes)
    I (xxxxx) BNCURL_COMMON: Using CA certificate from partition (xxxx bytes)
    ```
-
-### Issue 4: Certificate Size Too Large
-
-**Symptoms:**
-```
-ERROR: Certificate size xxxx exceeds maximum 4096 bytes per sector
-```
-
-**Solution:**
-Each certificate must be under 4KB (4096 bytes). Large certificate chains must be split into individual certificates:
-
-```bash
-# Check certificate size before flashing
-wc -c certificate.pem
-
-# If certificate is too large, split certificate chain into individual certificates
-awk '
-BEGIN { cert_count = 0; in_cert = 0 }
-/-----BEGIN CERTIFICATE-----/ { 
-    in_cert = 1; 
-    cert_count++; 
-    filename = "cert_" sprintf("%03d", cert_count) ".pem" 
-}
-in_cert { print > filename }
-/-----END CERTIFICATE-----/ { in_cert = 0; close(filename) }
-' large_certificate_chain.pem
-
-# Verify each individual certificate is under 4KB
-for cert in cert_*.pem; do
-    size=$(wc -c < "$cert")
-    if [ $size -le 4096 ]; then
-        echo "$cert: $size bytes (OK for flashing)"
-    else
-        echo "$cert: $size bytes (TOO LARGE - cannot flash)"
-    fi
-done
-
-# Flash individual certificates to separate 4KB sectors
-AT+BNFLASH_CERT=0x380000,@/certs/cert_001.pem
-AT+BNFLASH_CERT=0x381000,@/certs/cert_002.pem
-AT+BNFLASH_CERT=0x382000,@/certs/cert_003.pem
-```
-
-## Security Considerations
-
-### Certificate Validation
-- The system only validates PEM/DER format, not authenticity
-- Always verify certificates come from trusted sources
-- Regularly update certificates before expiration
-
-### Storage Security
-- Certificates stored in dedicated flash partition (0x380000-0x3C0000)
-- No encryption at rest - consider this for sensitive applications
-- Partition can be read by firmware but not external access
-
-### Network Security
-- Always use HTTPS URLs for sensitive data
-- Certificate verification prevents man-in-the-middle attacks
-- System falls back to hardcoded CA bundle if partition certificates fail
-
-## Advanced Usage
-
-### Automated Certificate Updates
-
-Create a script to automatically update certificates:
-
-```bash
-#!/bin/bash
-# update_certificates.sh
-
-# Download latest certificate for target server
-echo | openssl s_client -showcerts -servername api.openweathermap.org -connect api.openweathermap.org:443 2>/dev/null | openssl x509 -outform PEM > /tmp/new_cert.pem
-
-# Compare with existing certificate
-if ! cmp -s /tmp/new_cert.pem /path/to/current/cert.pem; then
-    echo "Certificate updated, flashing to ESP32..."
-    cp /tmp/new_cert.pem /sd/card/certs/openweather_ca.pem
-    # Send AT command to reflash certificate
-    echo "AT+BNCERT_CLEAR=0x380000" > /dev/ttyUSB0
-    echo "AT+BNFLASH_CERT=0x380000,@/certs/openweather_ca.pem" > /dev/ttyUSB0
-fi
-```
-
-### Multiple Server Certificates
-
-For applications connecting to multiple HTTPS servers:
-
-```bash
-# Generate certificates for multiple servers
-servers=("api.openweathermap.org" "httpbin.org" "api.github.com")
-addr=0x380000
-
-for server in "${servers[@]}"; do
-    echo "Processing $server..."
-    
-    # Extract certificate and verify size
-    echo | openssl s_client -showcerts -servername $server -connect $server:443 2>/dev/null | openssl x509 -outform PEM > "${server}_ca.pem"
-    
-    # Check certificate size (must be under 4KB)
-    size=$(wc -c < "${server}_ca.pem")
-    if [ $size -gt 4096 ]; then
-        echo "ERROR: Certificate for $server is $size bytes (exceeds 4KB limit)"
-        continue
-    fi
-    
-    echo "Certificate for $server: $size bytes (OK)"
-    echo "Flashing to address $addr..."
-    
-    # Copy to SD card and flash
-    cp "${server}_ca.pem" "/sd/card/certs/"
-    printf "AT+BNFLASH_CERT=0x%X,@/certs/%s_ca.pem\n" $addr $server
-    
-    # Increment to next 4KB boundary
-    addr=$((addr + 0x1000))
-done
-
-# Verify all certificates are registered
-echo "Verifying flashed certificates:"
-echo "AT+BNCERT_LIST?"
-```
 
 ## Testing and Validation
 
