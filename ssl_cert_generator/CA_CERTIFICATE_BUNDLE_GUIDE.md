@@ -124,8 +124,15 @@ This guide will walk you through the technical steps, but remember: you're essen
 **For a faster automated approach**, use the included Python script:
 
 ```bash
-# Generate important CA certificates automatically
-python generate_ca_certificates.py
+# First, find your CA bundle location
+openssl version -d
+
+# Generate important CA certificates automatically (specify your bundle path)
+python generate_ca_certificates.py --bundle /usr/ssl/cert.pem
+
+# Alternative bundle locations:
+# python generate_ca_certificates.py --bundle /mingw64/ssl/cert.pem
+# python generate_ca_certificates.py --bundle C:\Users\username\system_ca_bundle.pem
 
 # Copy generated files to SD card  
 cp sd_card_certs/*.pem /path/to/sd/card/certs/
@@ -134,7 +141,9 @@ cp sd_card_certs/*.pem /path/to/sd/card/certs/
 # (See sd_card_certs/flash_commands.txt)
 ```
 
-This script automates the certificate extraction and preparation process described in Method 3 below. See `CERTIFICATE_GENERATOR_README.md` for full script documentation.
+**Note:** You must specify the CA bundle path using the `--bundle` argument. The script no longer auto-detects bundle locations.
+
+This script automates the certificate extraction and preparation process described in Method 3 below. See `CERTIFICATE_GENERATOR_README.md` for full script documentation and help finding your CA bundle path.
 
 **Continue reading for manual methods and detailed understanding.**
 
