@@ -20,9 +20,14 @@ static TaskHandle_t g_webradio_task = NULL;
 
 // Forward declarations
 static void webradio_task(void *pvParameters);
+static void webradio_stream_task(void *pvParameters);
 static size_t webradio_write_callback(void *contents, size_t size, size_t nmemb, void *userp);
 static int webradio_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, 
                                      curl_off_t ultotal, curl_off_t ulnow);
+static bool webradio_init_shared_buffers(webradio_shared_buffers_t *shared, webradio_buffer_t *buffers);
+static void webradio_cleanup_shared_buffers(webradio_shared_buffers_t *shared);
+static bool webradio_add_data_to_buffer(const uint8_t *data, size_t size, webradio_shared_buffers_t *shared);
+static bool webradio_switch_buffers(webradio_shared_buffers_t *shared);
 
 bool bnwebradio_init(void)
 {
@@ -43,6 +48,7 @@ bool bnwebradio_init(void)
     g_webradio_ctx.state = WEBRADIO_STATE_IDLE;
     g_webradio_ctx.save_to_file = false;
     g_webradio_ctx.file_handle = NULL;
+    g_webradio_ctx.shared_buffers = NULL;
 
     ESP_LOGI(TAG, "Web radio module initialized");
     return true;
@@ -92,6 +98,7 @@ bool bnwebradio_start(const char *url, const char *save_file_path)
     g_webradio_ctx.stop_requested = false;
     g_webradio_ctx.file_handle = NULL;
     g_webradio_ctx.write_count = 0;
+    g_webradio_ctx.shared_buffers = NULL;
 
     // Handle file saving configuration
     if (save_file_path && strlen(save_file_path) > 0) {
@@ -111,15 +118,26 @@ bool bnwebradio_start(const char *url, const char *save_file_path)
         ESP_LOGI(TAG, "Streaming only mode (no file saving)");
     }
 
-    // Create streaming task
-    BaseType_t ret = xTaskCreate(webradio_task, "webradio_task", 8192, NULL, 5, &g_webradio_task);
+    // Create streaming (output) task first
+    BaseType_t ret = xTaskCreate(webradio_stream_task, "webradio_stream", 4096, NULL, 6, &g_webradio_ctx.stream_task);
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create webradio task");
+        ESP_LOGE(TAG, "Failed to create webradio stream task");
+        g_webradio_ctx.is_active = false;
+        g_webradio_ctx.state = WEBRADIO_STATE_ERROR;
+        g_webradio_ctx.save_to_file = false;
+        xSemaphoreGive(g_webradio_mutex);
+        return false;
+    }
+
+    // Create fetch (input) task
+    ret = xTaskCreate(webradio_task, "webradio_fetch", 8192, NULL, 5, &g_webradio_task);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create webradio fetch task");
         
-        // Close file if it was opened
-        if (g_webradio_ctx.file_handle) {
-            fclose((FILE*)g_webradio_ctx.file_handle);
-            g_webradio_ctx.file_handle = NULL;
+        // Clean up stream task
+        if (g_webradio_ctx.stream_task) {
+            vTaskDelete(g_webradio_ctx.stream_task);
+            g_webradio_ctx.stream_task = NULL;
         }
         
         g_webradio_ctx.is_active = false;
@@ -160,7 +178,12 @@ bool bnwebradio_stop(void)
 
     xSemaphoreGive(g_webradio_mutex);
 
-    // Wait for task to finish
+    // Signal stream task to wake up and exit
+    if (g_webradio_ctx.shared_buffers && g_webradio_ctx.shared_buffers->data_ready_sem) {
+        xSemaphoreGive(g_webradio_ctx.shared_buffers->data_ready_sem);
+    }
+
+    // Wait for fetch task to finish
     if (g_webradio_task != NULL) {
         // Wait up to 5 seconds for graceful shutdown
         for (int i = 0; i < 50; i++) {
@@ -172,9 +195,27 @@ bool bnwebradio_stop(void)
 
         // Force delete if still running
         if (g_webradio_task != NULL) {
-            ESP_LOGW(TAG, "Force terminating webradio task");
+            ESP_LOGW(TAG, "Force terminating webradio fetch task");
             vTaskDelete(g_webradio_task);
             g_webradio_task = NULL;
+        }
+    }
+
+    // Wait for stream task to finish
+    if (g_webradio_ctx.stream_task != NULL) {
+        // Wait up to 3 seconds for graceful shutdown
+        for (int i = 0; i < 30; i++) {
+            if (g_webradio_ctx.stream_task == NULL) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        // Force delete if still running
+        if (g_webradio_ctx.stream_task != NULL) {
+            ESP_LOGW(TAG, "Force terminating webradio stream task");
+            vTaskDelete(g_webradio_ctx.stream_task);
+            g_webradio_ctx.stream_task = NULL;
         }
     }
 
@@ -278,8 +319,23 @@ static void webradio_task(void *pvParameters)
 {
     CURL *curl = NULL;
     CURLcode res;
+    
+    // Allocate buffers on stack - these will persist for the lifetime of this task
+    webradio_buffer_t stack_buffers[2];
+    webradio_shared_buffers_t shared_buffers;
 
-    ESP_LOGI(TAG, "Web radio task started");
+    ESP_LOGI(TAG, "Web radio task started with stack-allocated buffers");
+
+    // Initialize the shared buffer context
+    if (!webradio_init_shared_buffers(&shared_buffers, stack_buffers)) {
+        ESP_LOGE(TAG, "Failed to initialize shared buffers");
+        goto task_cleanup;
+    }
+
+    // Set the shared buffer pointer in the global context
+    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+    g_webradio_ctx.shared_buffers = &shared_buffers;
+    xSemaphoreGive(g_webradio_mutex);
 
     // Initialize CURL
     curl = curl_easy_init();
@@ -383,9 +439,13 @@ task_cleanup:
         curl_easy_cleanup(curl);
     }
 
+    // Clean up shared buffers
+    webradio_cleanup_shared_buffers(&shared_buffers);
+
     // Update context and close file
     xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
     g_webradio_ctx.curl_handle = NULL;
+    g_webradio_ctx.shared_buffers = NULL;
     
     // Close file if it was opened
     if (g_webradio_ctx.file_handle) {
@@ -417,42 +477,27 @@ static size_t webradio_write_callback(void *contents, size_t size, size_t nmemb,
         return 0;
     }
     
-    // Take mutex once and hold for the entire operation to minimize timing issues
-    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
-    
     // Check if stop was requested
+    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
     if (g_webradio_ctx.stop_requested) {
         ESP_LOGI(TAG, "Stop requested, terminating stream");
         xSemaphoreGive(g_webradio_mutex);
         return 0; // This will cause CURL to abort
     }
-
-    bool file_write_success = true;
-    
-    // Save to file if enabled
-    if (g_webradio_ctx.save_to_file && g_webradio_ctx.file_handle) {
-        size_t written = fwrite(contents, 1, total_size, (FILE*)g_webradio_ctx.file_handle);
-        if (written != total_size) {
-            ESP_LOGE(TAG, "File write error: expected %zu bytes, wrote %zu bytes", total_size, written);
-            file_write_success = false;
-            // Don't abort - continue with UART streaming even if file write fails
-        } else {
-            // Increment write counter and flush periodically (every 100 writes)
-            g_webradio_ctx.write_count++;
-            if (g_webradio_ctx.write_count >= 100) {
-                fflush((FILE*)g_webradio_ctx.file_handle);
-                g_webradio_ctx.write_count = 0;
-            }
-        }
-    }
     
     // Update statistics
     g_webradio_ctx.bytes_streamed += total_size;
-    
     xSemaphoreGive(g_webradio_mutex);
     
-    // Stream to UART (always done for feedback) - do this outside mutex to avoid blocking
-    esp_at_port_write_data((uint8_t *)contents, total_size);
+    // Add data to buffer system for smooth streaming
+    xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+    webradio_shared_buffers_t *shared = g_webradio_ctx.shared_buffers;
+    xSemaphoreGive(g_webradio_mutex);
+    
+    if (shared && !webradio_add_data_to_buffer((uint8_t *)contents, total_size, shared)) {
+        ESP_LOGW(TAG, "Failed to add data to buffer, data loss possible");
+        // Continue anyway to avoid breaking the stream
+    }
 
     return total_size;
 }
@@ -471,4 +516,241 @@ static int webradio_progress_callback(void *clientp, curl_off_t dltotal, curl_of
     }
 
     return 0; // Continue transfer
+}
+
+static bool webradio_init_shared_buffers(webradio_shared_buffers_t *shared, webradio_buffer_t *buffers)
+{
+    if (!shared || !buffers) {
+        return false;
+    }
+
+    // Create buffer mutex
+    shared->buffer_mutex = xSemaphoreCreateMutex();
+    if (shared->buffer_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create buffer mutex");
+        return false;
+    }
+
+    // Create data ready semaphore
+    shared->data_ready_sem = xSemaphoreCreateBinary();
+    if (shared->data_ready_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to create data ready semaphore");
+        vSemaphoreDelete(shared->buffer_mutex);
+        shared->buffer_mutex = NULL;
+        return false;
+    }
+
+    // Set buffer pointer and initialize buffers
+    shared->buffers = buffers;
+    for (int i = 0; i < 2; i++) {
+        shared->buffers[i].size = 0;
+        shared->buffers[i].is_ready = false;
+        shared->buffers[i].is_full = false;
+    }
+
+    shared->active_buffer = 0;
+    shared->streaming_buffer = -1;
+
+    ESP_LOGI(TAG, "Stack-based audio buffers initialized (2 x %d bytes)", WEBRADIO_BUFFER_SIZE);
+    return true;
+}
+
+static void webradio_cleanup_shared_buffers(webradio_shared_buffers_t *shared)
+{
+    if (!shared) {
+        return;
+    }
+
+    if (shared->buffer_mutex != NULL) {
+        vSemaphoreDelete(shared->buffer_mutex);
+        shared->buffer_mutex = NULL;
+    }
+
+    if (shared->data_ready_sem != NULL) {
+        vSemaphoreDelete(shared->data_ready_sem);
+        shared->data_ready_sem = NULL;
+    }
+
+    shared->buffers = NULL;
+    ESP_LOGI(TAG, "Stack-based audio buffers cleaned up");
+}
+
+static bool webradio_add_data_to_buffer(const uint8_t *data, size_t size, webradio_shared_buffers_t *shared)
+{
+    if (!data || size == 0 || !shared || !shared->buffers) {
+        return false;
+    }
+
+    xSemaphoreTake(shared->buffer_mutex, portMAX_DELAY);
+
+    size_t remaining = size;
+    const uint8_t *src = data;
+
+    while (remaining > 0) {
+        // Check if stop was requested
+        xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+        bool stop_requested = g_webradio_ctx.stop_requested;
+        xSemaphoreGive(g_webradio_mutex);
+        
+        if (stop_requested) {
+            xSemaphoreGive(shared->buffer_mutex);
+            return false;
+        }
+
+        webradio_buffer_t *buffer = &shared->buffers[shared->active_buffer];
+        
+        // Check if current buffer is full
+        if (buffer->is_full) {
+            // Try to switch buffers
+            if (!webradio_switch_buffers(shared)) {
+                // Couldn't switch, buffer overflow - drop oldest data
+                ESP_LOGW(TAG, "Buffer overflow, dropping %zu bytes", remaining);
+                xSemaphoreGive(shared->buffer_mutex);
+                return false;
+            }
+            buffer = &shared->buffers[shared->active_buffer];
+        }
+
+        // Calculate how much we can write to current buffer
+        size_t available = WEBRADIO_BUFFER_SIZE - buffer->size;
+        size_t to_copy = (remaining < available) ? remaining : available;
+
+        // Copy data to buffer
+        memcpy(buffer->data + buffer->size, src, to_copy);
+        buffer->size += to_copy;
+        src += to_copy;
+        remaining -= to_copy;
+
+        // Check if buffer is now full
+        if (buffer->size >= WEBRADIO_BUFFER_SIZE) {
+            buffer->is_full = true;
+            buffer->is_ready = true;
+            
+            // Signal streaming task that data is ready
+            xSemaphoreGive(shared->data_ready_sem);
+        }
+    }
+
+    xSemaphoreGive(shared->buffer_mutex);
+    return true;
+}
+
+static bool webradio_switch_buffers(webradio_shared_buffers_t *shared)
+{
+    if (!shared || !shared->buffers) {
+        return false;
+    }
+
+    // Find the other buffer
+    int other_buffer = (shared->active_buffer == 0) ? 1 : 0;
+    
+    // Check if the other buffer is available
+    if (shared->buffers[other_buffer].is_ready) {
+        // Other buffer is still being streamed, can't switch
+        return false;
+    }
+
+    // Switch to the other buffer
+    shared->active_buffer = other_buffer;
+    shared->buffers[other_buffer].size = 0;
+    shared->buffers[other_buffer].is_full = false;
+    shared->buffers[other_buffer].is_ready = false;
+
+    return true;
+}
+
+static void webradio_stream_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Web radio stream task started");
+
+    while (true) {
+        // Get shared buffer context
+        xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+        webradio_shared_buffers_t *shared = g_webradio_ctx.shared_buffers;
+        bool stop_requested = g_webradio_ctx.stop_requested;
+        xSemaphoreGive(g_webradio_mutex);
+
+        // Exit if no shared buffer context or stop requested
+        if (!shared || stop_requested) {
+            break;
+        }
+
+        // Wait for data to be ready or stop signal
+        if (xSemaphoreTake(shared->data_ready_sem, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            
+            // Check if we should stop
+            xSemaphoreTake(shared->buffer_mutex, portMAX_DELAY);
+            
+            // Re-check stop status and shared context
+            xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+            stop_requested = g_webradio_ctx.stop_requested;
+            shared = g_webradio_ctx.shared_buffers;
+            xSemaphoreGive(g_webradio_mutex);
+            
+            if (stop_requested || !shared || !shared->buffers) {
+                xSemaphoreGive(shared->buffer_mutex);
+                break;
+            }
+
+            // Find a ready buffer to stream
+            int buffer_to_stream = -1;
+            for (int i = 0; i < 2; i++) {
+                if (shared->buffers[i].is_ready && 
+                    shared->streaming_buffer != i) {
+                    buffer_to_stream = i;
+                    break;
+                }
+            }
+
+            if (buffer_to_stream >= 0) {
+                shared->streaming_buffer = buffer_to_stream;
+                webradio_buffer_t *buffer = &shared->buffers[buffer_to_stream];
+                
+                // Copy buffer data for processing outside mutex
+                uint8_t temp_buffer[WEBRADIO_BUFFER_SIZE];
+                size_t buffer_size = buffer->size;
+                memcpy(temp_buffer, buffer->data, buffer_size);
+                
+                xSemaphoreGive(shared->buffer_mutex);
+
+                // Stream to UART outside of mutex to prevent blocking
+                esp_at_port_write_data(temp_buffer, buffer_size);
+
+                // Handle file saving if enabled
+                xSemaphoreTake(g_webradio_mutex, portMAX_DELAY);
+                if (g_webradio_ctx.save_to_file && g_webradio_ctx.file_handle) {
+                    size_t written = fwrite(temp_buffer, 1, buffer_size, (FILE*)g_webradio_ctx.file_handle);
+                    if (written != buffer_size) {
+                        ESP_LOGE(TAG, "File write error: expected %zu bytes, wrote %zu bytes", buffer_size, written);
+                    } else {
+                        // Increment write counter and flush periodically
+                        g_webradio_ctx.write_count++;
+                        if (g_webradio_ctx.write_count >= 50) {  // Flush less frequently with larger buffers
+                            fflush((FILE*)g_webradio_ctx.file_handle);
+                            g_webradio_ctx.write_count = 0;
+                        }
+                    }
+                }
+                xSemaphoreGive(g_webradio_mutex);
+
+                // Mark buffer as consumed
+                xSemaphoreTake(shared->buffer_mutex, portMAX_DELAY);
+                buffer->size = 0;
+                buffer->is_ready = false;
+                buffer->is_full = false;
+                shared->streaming_buffer = -1;
+                xSemaphoreGive(shared->buffer_mutex);
+                
+            } else {
+                xSemaphoreGive(shared->buffer_mutex);
+            }
+        } else {
+            // Timeout - continue to check for stop condition in main loop
+        }
+    }
+
+    // Clear task handle
+    g_webradio_ctx.stream_task = NULL;
+    ESP_LOGI(TAG, "Web radio stream task ended");
+    vTaskDelete(NULL);
 }

@@ -4,10 +4,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define WEBRADIO_BUFFER_SIZE 2048  // 2KB per buffer
 
 /**
  * @brief Web Radio streaming states
@@ -21,10 +25,31 @@ typedef enum {
 } webradio_state_t;
 
 /**
+ * @brief Audio buffer structure for double buffering
+ */
+typedef struct {
+    uint8_t data[WEBRADIO_BUFFER_SIZE];  // Buffer data
+    size_t size;                         // Current data size in buffer
+    bool is_ready;                       // Buffer ready for consumption
+    bool is_full;                        // Buffer is full and ready to switch
+} webradio_buffer_t;
+
+/**
+ * @brief Shared buffer context structure for task communication
+ */
+typedef struct {
+    webradio_buffer_t *buffers;      // Pointer to buffer array (allocated on task stack)
+    int active_buffer;               // Index of buffer currently being filled (0 or 1)
+    int streaming_buffer;            // Index of buffer currently being streamed (-1 if none)
+    SemaphoreHandle_t buffer_mutex;  // Mutex for buffer operations
+    SemaphoreHandle_t data_ready_sem; // Semaphore to signal data ready for streaming
+} webradio_shared_buffers_t;
+
+/**
  * @brief Web Radio context structure
  */
 typedef struct {
-    char url[512];                    // Radio stream URL
+    char url[256];                    // Radio stream URL
     bool is_active;                   // Stream active flag
     webradio_state_t state;          // Current streaming state
     size_t bytes_streamed;           // Total bytes streamed
@@ -35,6 +60,10 @@ typedef struct {
     bool save_to_file;               // Flag to enable file saving
     void *file_handle;               // FILE* handle for saving
     uint32_t write_count;            // Counter for periodic file flushing
+    
+    // Double buffering - now managed on task stack
+    webradio_shared_buffers_t *shared_buffers; // Pointer to shared buffer context
+    TaskHandle_t stream_task;        // Handle for streaming task
 } bnwebradio_context_t;
 
 /**
