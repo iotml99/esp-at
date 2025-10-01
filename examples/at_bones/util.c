@@ -7,6 +7,27 @@
 #include "util.h"
 #include <string.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include "esp_at.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+static const char *TAG = "UTIL";
+
+// UART data collection timeout (30 seconds)
+#define UART_DATA_COLLECTION_TIMEOUT_MS 30000
+
+// Semaphore for UART data collection synchronization
+static SemaphoreHandle_t s_uart_data_sync_sema = NULL;
+
+// Callback for UART data collection
+static void uart_data_wait_callback(void)
+{
+    if (s_uart_data_sync_sema) {
+        xSemaphoreGive(s_uart_data_sync_sema);
+    }
+}
 
 /**
  * @brief Convert uint64_t to character array (string representation)
@@ -138,5 +159,88 @@ bool validate_uint64_string(const char *str, bool is_hex)
         }
     }
     
+    return true;
+}
+
+/**
+ * @brief Collect data from UART with timeout
+ */
+bool collect_uart_data(size_t expected_bytes, char **collected_data, size_t *collected_size)
+{
+    if (expected_bytes == 0) {
+        // Special case: 0 bytes - no data collection needed
+        *collected_data = NULL;
+        *collected_size = 0;
+        ESP_LOGI(TAG, "No UART data collection needed (0 bytes expected)");
+        return true;
+    }
+    
+    // Allocate buffer for collected data
+    *collected_data = malloc(expected_bytes + 1); // +1 for null terminator if needed
+    if (!*collected_data) {
+        ESP_LOGE(TAG, "Failed to allocate memory for UART data collection");
+        return false;
+    }
+    
+    // Create semaphore for data collection synchronization
+    if (!s_uart_data_sync_sema) {
+        s_uart_data_sync_sema = xSemaphoreCreateBinary();
+        if (!s_uart_data_sync_sema) {
+            ESP_LOGE(TAG, "Failed to create UART data sync semaphore");
+            free(*collected_data);
+            *collected_data = NULL;
+            return false;
+        }
+    }
+    
+    *collected_size = 0;
+    uint32_t timeout_ticks = pdMS_TO_TICKS(UART_DATA_COLLECTION_TIMEOUT_MS);
+    
+    ESP_LOGI(TAG, "Collecting %u bytes from UART (timeout: %d ms)", (unsigned int)expected_bytes, UART_DATA_COLLECTION_TIMEOUT_MS);
+    
+    // Enter specific mode for UART data collection
+    esp_at_port_enter_specific(uart_data_wait_callback);
+    
+    // Show prompt
+    esp_at_port_write_data((uint8_t *)">", 1);
+    
+    // Collect data using ESP-AT framework
+    while (*collected_size < expected_bytes) {
+        if (xSemaphoreTake(s_uart_data_sync_sema, timeout_ticks) == pdTRUE) {
+            // Read available data
+            size_t bytes_to_read = expected_bytes - *collected_size;
+            size_t bytes_read = esp_at_port_read_data((uint8_t *)(*collected_data + *collected_size), bytes_to_read);
+            *collected_size += bytes_read;
+            
+            ESP_LOGD(TAG, "Read %u bytes, total collected: %u/%u", 
+                     (unsigned int)bytes_read, (unsigned int)*collected_size, (unsigned int)expected_bytes);
+            
+            if (*collected_size >= expected_bytes) {
+                break;
+            }
+        } else {
+            // Timeout occurred
+            ESP_LOGW(TAG, "UART data collection timeout after %d ms", UART_DATA_COLLECTION_TIMEOUT_MS);
+            ESP_LOGE(TAG, "Timeout waiting for %u bytes (collected %u)", (unsigned int)expected_bytes, (unsigned int)*collected_size);
+            esp_at_port_exit_specific();
+            vSemaphoreDelete(s_uart_data_sync_sema);
+            s_uart_data_sync_sema = NULL;
+            free(*collected_data);
+            *collected_data = NULL;
+            return false;
+        }
+    }
+    
+    // Exit specific mode
+    esp_at_port_exit_specific();
+    
+    // Clean up semaphore
+    vSemaphoreDelete(s_uart_data_sync_sema);
+    s_uart_data_sync_sema = NULL;
+    
+    // Null-terminate for safety (doesn't count toward data size)
+    (*collected_data)[*collected_size] = '\0';
+    
+    ESP_LOGI(TAG, "Successfully collected %u bytes from UART", (unsigned int)*collected_size);
     return true;
 }

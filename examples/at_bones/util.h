@@ -82,4 +82,22 @@ int uint64_to_hex_string(uint64_t value, char *buffer, size_t buffer_size, bool 
  */
 bool validate_uint64_string(const char *str, bool is_hex);
 
+/**
+ * @brief Collect data from UART with timeout
+ * 
+ * This function collects a specified number of bytes from UART using the ESP-AT framework.
+ * It displays a '>' prompt and waits for data with a 30-second timeout.
+ * 
+ * @param expected_bytes Number of bytes to collect
+ * @param collected_data Pointer to store collected data (caller must free on success)
+ * @param collected_size Pointer to store actual collected size
+ * 
+ * @return true if all bytes collected successfully, false on timeout or error
+ * 
+ * @note If expected_bytes is 0, returns true with NULL data and 0 size
+ * @note Caller is responsible for freeing collected_data on success
+ * @note Uses ESP-AT framework specific functions (esp_at_port_*)
+ */
+bool collect_uart_data(size_t expected_bytes, char **collected_data, size_t *collected_size);
+
 #endif /* UTIL_H */

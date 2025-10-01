@@ -5,6 +5,7 @@
  */
 
 #include "bncert.h"
+#include "bn_constants.h"
 #include "cert_bundle.h"
 #include "bncurl_params.h"
 #include "bnsd.h"
@@ -275,17 +276,6 @@ bool bncert_validate_flash_address(uint32_t address, size_t size)
     return true;
 }
 
-// Static semaphore for UART data synchronization (similar to AT user commands)
-static SemaphoreHandle_t s_bncert_data_sync_sema = NULL;
-
-// Callback function for UART data arrival (similar to at_user_wait_data_cb)
-static void bncert_wait_data_cb(void)
-{
-    if (s_bncert_data_sync_sema) {
-        xSemaphoreGive(s_bncert_data_sync_sema);
-    }
-}
-
 bool bncert_collect_uart_data(bncert_params_t *params)
 {
     if (!params || params->source_type != BNCERT_SOURCE_UART) {
@@ -304,96 +294,35 @@ bool bncert_collect_uart_data(bncert_params_t *params)
         return false;
     }
 
-    // Allocate 4KB buffer regardless of requested size for safety
-    params->uart_data = malloc(BNCERT_MAX_DATA_SIZE);
-    if (!params->uart_data) {
-        ESP_LOGE(TAG, "Failed to allocate %u bytes for UART data buffer", BNCERT_MAX_DATA_SIZE);
-        char error_msg[80];
-        int len = snprintf(error_msg, sizeof(error_msg), 
-                          "ERROR: Failed to allocate 4KB buffer for certificate data\r\n");
-        esp_at_port_write_data((uint8_t *)error_msg, len);
+    ESP_LOGI(TAG, "Collecting %u bytes certificate data from UART", (unsigned int)params->data_size);
+
+    // Use the shared collect_uart_data function from util.c
+    char *collected_data = NULL;
+    size_t collected_size = 0;
+    
+    bool success = collect_uart_data(params->data_size, &collected_data, &collected_size);
+    
+    if (!success) {
+        ESP_LOGE(TAG, "Failed to collect certificate data from UART");
         return false;
     }
-
-    // Clear the entire buffer
-    memset(params->uart_data, 0, BNCERT_MAX_DATA_SIZE);
-
-    ESP_LOGI(TAG, "Collecting %u bytes from UART using AT framework pattern", 
-             (unsigned int)params->data_size);
-
-    // Create semaphore for data synchronization (like AT user commands)
-    s_bncert_data_sync_sema = xSemaphoreCreateBinary();
-    if (!s_bncert_data_sync_sema) {
-        ESP_LOGE(TAG, "Failed to create data synchronization semaphore");
-        free(params->uart_data);
-        params->uart_data = NULL;
+    
+    // Validate PEM format before proceeding
+    if (!cert_bundle_validate_pem((uint8_t *)collected_data, collected_size)) {
+        ESP_LOGE(TAG, "Certificate PEM validation failed");
+        esp_at_port_write_data((uint8_t *)"ERROR: Invalid PEM certificate format\r\n", 41);
+        free(collected_data);
         return false;
     }
-
-    // Enter specific mode with our callback (like AT user commands do)
-    esp_at_port_enter_specific(bncert_wait_data_cb);
     
-    // Send just the ">" prompt manually (since there's no prompt-only result code)
-    const char *prompt = ">";
-    esp_at_port_write_data((uint8_t *)prompt, strlen(prompt));
-
-    // Collect data using the AT framework pattern
-    int32_t bytes_received = 0;
-    uint32_t timeout_ms = 30000; // 30 second timeout
-    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    // Store the collected and validated data
+    params->uart_data = (uint8_t *)collected_data;
+    params->collected_size = collected_size;
     
-    // Use semaphore-based waiting like the AT user commands
-    while (bytes_received < (int32_t)params->data_size) {
-        // Wait for data arrival signal (with timeout)
-        if (xSemaphoreTake(s_bncert_data_sync_sema, timeout_ticks) == pdTRUE) {
-            // Data is available, read it
-            int32_t remaining = (int32_t)params->data_size - bytes_received;
-            int32_t len = esp_at_port_read_data(params->uart_data + bytes_received, remaining);
-            
-            if (len > 0) {
-                bytes_received += len;
-                ESP_LOGD(TAG, "Read %ld bytes, total: %ld/%u", 
-                         (long)len, (long)bytes_received, (unsigned int)params->data_size);
-                
-                // Show progress every 256 bytes
-                if (bytes_received % 256 == 0) {
-                    ESP_LOGI(TAG, "Received %ld/%u bytes", (long)bytes_received, (unsigned int)params->data_size);
-                }
-            }
-        } else {
-            // Timeout waiting for data
-            ESP_LOGE(TAG, "Timeout waiting for certificate data - received %ld/%u bytes", 
-                     (long)bytes_received, (unsigned int)params->data_size);
-            break;
-        }
-    }
-
-    // Exit specific mode (like AT user commands do)
-    esp_at_port_exit_specific();
-
-    // Clean up semaphore
-    vSemaphoreDelete(s_bncert_data_sync_sema);
-    s_bncert_data_sync_sema = NULL;
-
-    params->collected_size = (size_t)bytes_received;
+    ESP_LOGI(TAG, "Successfully collected and validated %u bytes of certificate data", 
+             (unsigned int)params->collected_size);
     
-    // Check for remaining data (this is what causes "busy p..." in AT framework)
-    int32_t remaining_data = esp_at_port_get_data_length();
-    if (remaining_data > 0) {
-        ESP_LOGW(TAG, "Warning: %ld bytes remain in AT buffer (will cause busy message)", 
-                 (long)remaining_data);
-        // The AT framework will handle this and send "busy p..." automatically
-    }
-    
-    if (bytes_received == (int32_t)params->data_size) {
-        ESP_LOGI(TAG, "Successfully collected %u bytes from UART using AT framework", 
-                 (unsigned int)params->collected_size);
-        return true;
-    } else {
-        ESP_LOGW(TAG, "Partial data collection: %ld/%u bytes received", 
-                 (long)bytes_received, (unsigned int)params->data_size);
-        return false;
-    }
+    return true;
 }
 
 bncert_result_t bncert_flash_certificate(bncert_params_t *params)
@@ -613,7 +542,7 @@ void bncert_list_valid_addresses(void)
     uint32_t partition_end = s_cert_partition->address + s_cert_partition->size;
     uint32_t partition_size = s_cert_partition->size;
     
-    char response_buffer[256];
+    char response_buffer[BN_BUFFER_LARGE];
     
     // Send partition information
     int len = snprintf(response_buffer, sizeof(response_buffer),

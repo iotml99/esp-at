@@ -5,6 +5,11 @@
  */
 
 #include "bnsd.h"
+#include "bn_constants.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include "bnsd.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -20,7 +25,7 @@
 
 // Pin assignments for SD card (based on ESP-IDF example)
 
-#define STEPHAN_BUILD
+// #define STEPHAN_BUILD
 #ifdef STEPHAN_BUILD
 /*
 +--------------+----------+-------+
@@ -52,7 +57,7 @@ static const char *TAG = "BNSD";
 static struct {
     bool initialized;
     bool mounted;
-    char mount_point[32];
+    char mount_point[BN_BUFFER_SMALL];
     sdmmc_card_t *card;
     esp_vfs_fat_sdmmc_mount_config_t mount_config;
 } g_sd_ctx = {0};
@@ -91,7 +96,7 @@ void bnsd_deinit(void)
     ESP_LOGI(TAG, "SD card module deinitialized");
 }
 
-bool bnsd_mount(const char *mount_point)
+bool bnsd_mount(void)
 {
     if (!g_sd_ctx.initialized) {
         ESP_LOGE(TAG, "SD card module not initialized");
@@ -103,11 +108,8 @@ bool bnsd_mount(const char *mount_point)
         return true;
     }
     
-    // Use provided mount point or default
-    if (mount_point) {
-        strncpy(g_sd_ctx.mount_point, mount_point, sizeof(g_sd_ctx.mount_point) - 1);
-        g_sd_ctx.mount_point[sizeof(g_sd_ctx.mount_point) - 1] = '\0';
-    }
+    // Always use hardcoded mount point
+    // Mount point already set to BNSD_MOUNT_POINT in bnsd_init()
     
     ESP_LOGI(TAG, "Starting adaptive frequency SD card mount at %s", g_sd_ctx.mount_point);
     
@@ -224,21 +226,21 @@ bool bnsd_mount(const char *mount_point)
         ESP_LOGI(TAG, "Mount point: %s", g_sd_ctx.mount_point);
         ESP_LOGI(TAG, "============================");
         
-        printf("SD Card Info:\n");
-        printf("  Name: %s\n", g_sd_ctx.card->cid.name);
-        printf("  Frequency: %u kHz\n", host.max_freq_khz);
-        printf("  Size: %llu MB\n", card_size_mb);
-        printf("  Mount: %s\n", g_sd_ctx.mount_point);
+        ESP_LOGI(TAG, "SD Card Info:");
+        ESP_LOGI(TAG, "  Name: %s", g_sd_ctx.card->cid.name);
+        ESP_LOGI(TAG, "  Frequency: %u kHz", host.max_freq_khz);
+        ESP_LOGI(TAG, "  Size: %llu MB", card_size_mb);
+        ESP_LOGI(TAG, "  Mount: %s", g_sd_ctx.mount_point);
         
         // Performance indicator
         if (host.max_freq_khz >= 32000) {
-            printf("  Performance: Excellent (≥32MHz)\n");
+            ESP_LOGI(TAG, "  Performance: Excellent (≥32MHz)");
         } else if (host.max_freq_khz >= 10000) {
-            printf("  Performance: Good (≥10MHz)\n");
+            ESP_LOGI(TAG, "  Performance: Good (≥10MHz)");
         } else if (host.max_freq_khz >= 1000) {
-            printf("  Performance: Fair (≥1MHz)\n");
+            ESP_LOGI(TAG, "  Performance: Fair (≥1MHz)");
         } else {
-            printf("  Performance: Basic (<1MHz)\n");
+            ESP_LOGI(TAG, "  Performance: Basic (<1MHz)");
         }
     }
     
@@ -467,7 +469,7 @@ bool bnsd_format(void)
     bool was_mounted = g_sd_ctx.mounted;
     if (!was_mounted) {
         ESP_LOGI(TAG, "Mounting SD card before formatting (adaptive frequency will be used)");
-        if (!bnsd_mount(NULL)) {
+        if (!bnsd_mount()) {
             ESP_LOGE(TAG, "Failed to mount SD card before formatting");
             return false;
         }

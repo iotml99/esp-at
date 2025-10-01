@@ -45,12 +45,11 @@ bool bnsd_init(void);
 void bnsd_deinit(void);
 
 /**
- * @brief Mount SD card
+ * @brief Mount SD card at /sdcard mount point
  * 
- * @param mount_point Mount point path (optional, uses default if NULL)
  * @return true on success, false on failure
  */
-bool bnsd_mount(const char *mount_point);
+bool bnsd_mount(void);
 
 /**
  * @brief Unmount SD card

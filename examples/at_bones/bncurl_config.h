@@ -132,7 +132,7 @@
 
 /* ==================== Memory Configuration ==================== */
 /** Maximum memory allocation for single operation (ESP32 constraint) */
-#define BNCURL_MAX_MEMORY_ALLOCATION    (512 * 1024)  // 512KB
+#define BNCURL_MAX_MEMORY_ALLOCATION    (128 * 1024)  // 128KB
 
 /** HTTP response buffer size */
 #define BNCURL_HTTP_RESPONSE_BUFFER     4096

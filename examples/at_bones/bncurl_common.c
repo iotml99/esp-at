@@ -9,6 +9,7 @@
 #include "bncurl_config.h"
 #include "bncurl_cookies.h"
 #include "cert_bundle.h"
+#include "bn_constants.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -43,7 +44,7 @@ size_t bncurl_combined_header_callback(char *buffer, size_t size, size_t nitems,
             while (*cookie_start == ' ' || *cookie_start == '\t') cookie_start++; // Skip whitespace
             
             // Create null-terminated cookie string
-            char cookie_string[512];
+            char cookie_string[BN_BUFFER_EXTENDED];
             size_t cookie_len = total_size - (cookie_start - buffer);
             if (cookie_len > sizeof(cookie_string) - 1) {
                 cookie_len = sizeof(cookie_string) - 1;
@@ -350,7 +351,7 @@ size_t bncurl_common_header_callback(char *buffer, size_t size, size_t nitems, v
             strncmp(buffer, "HTTP/", 5) != 0) {
             
             // Clean up the header line by removing trailing CRLF
-            char header_line[512];
+            char header_line[BN_BUFFER_EXTENDED];
             size_t copy_len = total_size < sizeof(header_line) - 3 ? total_size : sizeof(header_line) - 3; // Leave space for \r\n\0
             memcpy(header_line, buffer, copy_len);
             header_line[copy_len] = '\0';
@@ -807,7 +808,7 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     
     // Add Range header if -r parameter is provided (GET requests only)
     if (strcmp(method, "GET") == 0 && strlen(ctx->params.range) > 0) {
-        char range_header[128];
+        char range_header[BN_BUFFER_STANDARD];
         snprintf(range_header, sizeof(range_header), "Range: bytes=%s", ctx->params.range);
         headers = curl_slist_append(headers, range_header);
         ESP_LOGI(TAG, "Added Range header: %s", range_header);
@@ -1094,7 +1095,7 @@ bool bncurl_common_get_content_length(bncurl_context_t *ctx, size_t *content_len
     
     // Check if this is a range request and add Range header
     if (strlen(ctx->params.range) > 0) {
-        char range_header[256];
+        char range_header[BN_BUFFER_LARGE];
         snprintf(range_header, sizeof(range_header), "Range: bytes=%s", ctx->params.range);
         headers = curl_slist_append(headers, range_header);
         ESP_LOGI(TAG, "Adding Range header for HEAD request: %s", range_header);

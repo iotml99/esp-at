@@ -19,121 +19,20 @@
 #include "bncert.h"
 #include "cert_bundle.h"
 #include "bnwebradio.h"
+#include "bn_constants.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-
+#include "esp_sntp.h"
 
 static bncurl_context_t *bncurl_ctx = NULL;
 
 static const char *TAG = "AT_BONES";
 
-// UART data collection timeout (30 seconds)
-#define UART_DATA_COLLECTION_TIMEOUT_MS 30000
-
-// Semaphore for UART data collection synchronization
-static SemaphoreHandle_t s_uart_data_sync_sema = NULL;
-
-// Callback for UART data collection
-static void uart_data_wait_callback(void)
+static uint8_t at_bncurl_test(uint8_t *cmd_name)
 {
-    if (s_uart_data_sync_sema) {
-        xSemaphoreGive(s_uart_data_sync_sema);
-    }
-}
-
-/**
- * @brief Collect data from UART with timeout for numeric -du parameter
- * 
- * @param expected_bytes Number of bytes to collect
- * @param collected_data Pointer to store collected data (caller must free)
- * @param collected_size Pointer to store actual collected size
- * @return true if all bytes collected successfully, false on timeout or error
- */
-static bool collect_uart_data(size_t expected_bytes, char **collected_data, size_t *collected_size)
-{
-    if (expected_bytes == 0) {
-        // Special case: 0 bytes - no data collection needed
-        *collected_data = NULL;
-        *collected_size = 0;
-        ESP_LOGI(TAG, "No UART data collection needed (0 bytes expected)");
-        return true;
-    }
-    
-    // Allocate buffer for collected data
-    *collected_data = malloc(expected_bytes + 1); // +1 for null terminator if needed
-    if (!*collected_data) {
-        ESP_LOGE(TAG, "Failed to allocate memory for UART data collection");
-        return false;
-    }
-    
-    // Create semaphore for data collection synchronization
-    if (!s_uart_data_sync_sema) {
-        s_uart_data_sync_sema = xSemaphoreCreateBinary();
-        if (!s_uart_data_sync_sema) {
-            ESP_LOGE(TAG, "Failed to create UART data sync semaphore");
-            free(*collected_data);
-            *collected_data = NULL;
-            return false;
-        }
-    }
-    
-    *collected_size = 0;
-    uint32_t timeout_ticks = pdMS_TO_TICKS(UART_DATA_COLLECTION_TIMEOUT_MS);
-    
-    ESP_LOGI(TAG, "Collecting %u bytes from UART (timeout: %d ms)", (unsigned int)expected_bytes, UART_DATA_COLLECTION_TIMEOUT_MS);
-    
-    // Enter specific mode for UART data collection
-    esp_at_port_enter_specific(uart_data_wait_callback);
-    
-    // Show prompt
-    esp_at_port_write_data((uint8_t *)">", 1);
-    
-    // Collect data using ESP-AT framework
-    while (*collected_size < expected_bytes) {
-        if (xSemaphoreTake(s_uart_data_sync_sema, timeout_ticks) == pdTRUE) {
-            // Read available data
-            size_t bytes_to_read = expected_bytes - *collected_size;
-            size_t bytes_read = esp_at_port_read_data((uint8_t *)(*collected_data + *collected_size), bytes_to_read);
-            *collected_size += bytes_read;
-            
-            ESP_LOGD(TAG, "Read %u bytes, total collected: %u/%u", 
-                     (unsigned int)bytes_read, (unsigned int)*collected_size, (unsigned int)expected_bytes);
-            
-            if (*collected_size >= expected_bytes) {
-                break;
-            }
-        } else {
-            // Timeout occurred
-            ESP_LOGW(TAG, "UART data collection timeout after %d ms", UART_DATA_COLLECTION_TIMEOUT_MS);
-            printf("ERROR: Timeout waiting for %u bytes (collected %u)\r\n", (unsigned int)expected_bytes, (unsigned int)*collected_size);
-            esp_at_port_exit_specific();
-            vSemaphoreDelete(s_uart_data_sync_sema);
-            s_uart_data_sync_sema = NULL;
-            free(*collected_data);
-            *collected_data = NULL;
-            return false;
-        }
-    }
-    
-    // Exit specific mode
-    esp_at_port_exit_specific();
-    
-    // Clean up semaphore
-    vSemaphoreDelete(s_uart_data_sync_sema);
-    s_uart_data_sync_sema = NULL;
-    
-    // Null-terminate for safety (doesn't count toward data size)
-    (*collected_data)[*collected_size] = '\0';
-    
-    ESP_LOGI(TAG, "Successfully collected %u bytes from UART", (unsigned int)*collected_size);
-    return true;
-}
-
-static uint8_t at_test_cmd_test(uint8_t *cmd_name)
-{
-    uint8_t buffer[512] = {0};
-    snprintf((char *)buffer, 512, 
+    uint8_t buffer[BN_BUFFER_EXTENDED] = {0};
+    snprintf((char *)buffer, BN_BUFFER_EXTENDED, 
         "AT+BNCURL=<method>,<url>[,<options>]\r\n"
         "HTTP/HTTPS client with libcurl support\r\n"
         "\r\n"
@@ -160,9 +59,9 @@ static uint8_t at_test_cmd_test(uint8_t *cmd_name)
     return ESP_AT_RESULT_CODE_OK;
 }
 
-static uint8_t at_query_cmd_test(uint8_t *cmd_name)
+static uint8_t at_bncurl_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[128] = {0};
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
     
     // Get executor status
     bncurl_executor_status_t status = bncurl_executor_get_status();
@@ -183,13 +82,13 @@ static uint8_t at_query_cmd_test(uint8_t *cmd_name)
             break;
     }
     
-    snprintf((char *)buffer, 128, "+BNCURL:%s\r\n", status_str);
+    snprintf((char *)buffer, BN_BUFFER_STANDARD, "+BNCURL:%s\r\n", status_str);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
 
     return ESP_AT_RESULT_CODE_OK;
 }
 
-static uint8_t at_setup_cmd_test(uint8_t para_num)
+static uint8_t at_bncurl_setup(uint8_t para_num)
 {
     // Parse parameters first
     uint8_t parse_result = bncurl_parse_and_print_params(para_num, &bncurl_ctx->params);
@@ -241,18 +140,18 @@ static uint8_t at_setup_cmd_test(uint8_t para_num)
         }
     } else {
         // Unsupported method
-        uint8_t buffer[64] = {0};
-        snprintf((char *)buffer, 64, "ERROR: Method %s not supported\r\n", bncurl_ctx->params.method);
+        uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
+        snprintf((char *)buffer, BN_BUFFER_MEDIUM, "ERROR: Method %s not supported\r\n", bncurl_ctx->params.method);
         esp_at_port_write_data(buffer, strlen((char *)buffer));
         bncurl_params_cleanup(&bncurl_ctx->params);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 }
 
-static uint8_t at_exe_cmd_test(uint8_t *cmd_name)
+static uint8_t at_bncurl_exe(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "execute command: <AT%s> is executed\r\n", cmd_name);
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
+    snprintf((char *)buffer, BN_BUFFER_MEDIUM, "execute command: <AT%s> is executed\r\n", cmd_name);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
 
     return ESP_AT_RESULT_CODE_OK;
@@ -260,8 +159,8 @@ static uint8_t at_exe_cmd_test(uint8_t *cmd_name)
 
 static uint8_t at_bncurl_timeout_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[128] = {0};
-    snprintf((char *)buffer, 128, 
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
+    snprintf((char *)buffer, BN_BUFFER_STANDARD, 
         "AT+BNCURL_TIMEOUT=<timeout>\r\n"
         "Set timeout for server reaction in seconds.\r\n"
         "Range: %d-%d seconds\r\n", 
@@ -272,12 +171,12 @@ static uint8_t at_bncurl_timeout_test(uint8_t *cmd_name)
 
 static uint8_t at_bncurl_timeout_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
     uint32_t timeout = bncurl_get_timeout(bncurl_ctx);
     if (timeout == 0) {
         timeout = BNCURL_DEFAULT_TIMEOUT;  // Return default if not set
     }
-    snprintf((char *)buffer, 64, "+BNCURL_TIMEOUT:%u\r\n", timeout);
+    snprintf((char *)buffer, BN_BUFFER_MEDIUM, "+BNCURL_TIMEOUT:%u\r\n", timeout);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -313,15 +212,15 @@ static uint8_t at_bncurl_stop_query(uint8_t *cmd_name)
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    uint8_t buffer[64] = {0};
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
     
     // Try to stop current executor operation
     bool stopped = bncurl_executor_stop_current();
     
     if (stopped) {
-        snprintf((char *)buffer, 64, "+BNCURL_STOP:1\r\n");
+        snprintf((char *)buffer, BN_BUFFER_MEDIUM, "+BNCURL_STOP:1\r\n");
     } else {
-        snprintf((char *)buffer, 64, "+BNCURL_STOP:0\r\n");
+        snprintf((char *)buffer, BN_BUFFER_MEDIUM, "+BNCURL_STOP:0\r\n");
     }
     
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -340,9 +239,9 @@ static uint8_t at_bncurl_prog_query(uint8_t *cmd_name)
     
     bncurl_get_progress(bncurl_ctx, &bytes_transferred, &bytes_total);
 
-    uint8_t buffer[128] = {0};
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
     // Use %u for 32-bit values to ensure compatibility
-    snprintf((char *)buffer, 128, "+BNCURL_PROG:%u/%u\r\n", 
+    snprintf((char *)buffer, BN_BUFFER_STANDARD, "+BNCURL_PROG:%u/%u\r\n", 
              (uint32_t)bytes_transferred, (uint32_t)bytes_total);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     
@@ -352,23 +251,23 @@ static uint8_t at_bncurl_prog_query(uint8_t *cmd_name)
 // SD Card command implementations
 static uint8_t at_bnsd_mount_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[128] = {0};
-    snprintf((char *)buffer, 128, 
-        "AT+BNSD_MOUNT[=<mount_point>]\r\n"
-        "Mount SD card at specified mount point (default: /sdcard)\r\n");
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
+    snprintf((char *)buffer, BN_BUFFER_STANDARD, 
+        "AT+BNSD_MOUNT\r\n"
+        "Mount SD card at /sdcard\r\n");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
 
 static uint8_t at_bnsd_mount_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[128] = {0};
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
     
     if (bnsd_is_mounted()) {
         const char *mount_point = bnsd_get_mount_point();
-        snprintf((char *)buffer, 128, "+BNSD_MOUNT:1,\"%s\"\r\n", mount_point ? mount_point : "/sdcard");
+        snprintf((char *)buffer, BN_BUFFER_STANDARD, "+BNSD_MOUNT:1,\"%s\"\r\n", mount_point ? mount_point : "/sdcard");
     } else {
-        snprintf((char *)buffer, 128, "+BNSD_MOUNT:0\r\n");
+        snprintf((char *)buffer, BN_BUFFER_STANDARD, "+BNSD_MOUNT:0\r\n");
     }
     
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -377,41 +276,34 @@ static uint8_t at_bnsd_mount_query(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_mount_setup(uint8_t para_num)
 {
-    uint8_t *mount_point = NULL;
-    
-    if (para_num > 1) {
+    // AT+BNSD_MOUNT no longer accepts parameters - always mounts at /sdcard
+    if (para_num != 0) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
-    if (para_num == 1) {
-        if (esp_at_get_para_as_str(0, &mount_point) != ESP_AT_PARA_PARSE_RESULT_OK) {
-            return ESP_AT_RESULT_CODE_ERROR;
-        }
-    }
-    
-    bool success = bnsd_mount((const char *)mount_point);
+    bool success = bnsd_mount();
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
 static uint8_t at_bnsd_mount_exe(uint8_t *cmd_name)
 {
-    bool success = bnsd_mount(NULL);
+    bool success = bnsd_mount();
     return success ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
 static uint8_t at_bnsd_unmount_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "AT+BNSD_UNMOUNT\r\nUnmount SD card\r\n");
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
+    snprintf((char *)buffer, BN_BUFFER_MEDIUM, "AT+BNSD_UNMOUNT\r\nUnmount SD card\r\n");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
 
 static uint8_t at_bnsd_unmount_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
     bnsd_status_t status = bnsd_get_status();
-    snprintf((char *)buffer, 64, "+BNSD_UNMOUNT:%d\r\n", (int)status);
+    snprintf((char *)buffer, BN_BUFFER_MEDIUM, "+BNSD_UNMOUNT:%d\r\n", (int)status);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -424,8 +316,8 @@ static uint8_t at_bnsd_unmount_exe(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_space_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[128] = {0};
-    snprintf((char *)buffer, 128, 
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
+    snprintf((char *)buffer, BN_BUFFER_STANDARD, 
         "AT+BNSD_SPACE?\r\n"
         "Get SD card space information in format: +BNSD_SPACE:total_bytes/used_bytes\r\n"
         "Note: used_bytes includes filesystem overhead and user data\r\n");
@@ -435,15 +327,15 @@ static uint8_t at_bnsd_space_test(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_space_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[512] = {0};  // Increased buffer size for uint64 strings
+    uint8_t buffer[BN_BUFFER_EXTENDED] = {0};  // For uint64 strings
     bnsd_info_t info;
     
     if (!bnsd_get_space_info(&info)) {
         snprintf((char *)buffer, sizeof(buffer), "+BNSD_SPACE:ERROR\r\n");
     } else {
         // Convert uint64_t values to strings using util function
-        char total_str[32];
-        char used_str[32];
+        char total_str[BN_BUFFER_SMALL];
+        char used_str[BN_BUFFER_SMALL];
         
         int total_len = uint64_to_string(info.total_bytes, total_str, sizeof(total_str));
         int used_len = uint64_to_string(info.used_bytes, used_str, sizeof(used_str));
@@ -463,8 +355,8 @@ static uint8_t at_bnsd_space_query(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_format_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[128] = {0};
-    snprintf((char *)buffer, 128, 
+    uint8_t buffer[BN_BUFFER_STANDARD] = {0};
+    snprintf((char *)buffer, BN_BUFFER_STANDARD, 
         "AT+BNSD_FORMAT\r\n"
         "Format SD card with FAT32 filesystem\r\n"
         "WARNING: This will erase all data on the SD card!\r\n");
@@ -474,8 +366,8 @@ static uint8_t at_bnsd_format_test(uint8_t *cmd_name)
 
 static uint8_t at_bnsd_format_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
-    snprintf((char *)buffer, 64, "+BNSD_FORMAT:%s\r\n", 
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
+    snprintf((char *)buffer, BN_BUFFER_MEDIUM, "+BNSD_FORMAT:%s\r\n", 
              bnsd_is_mounted() ? "READY" : "NO_CARD");
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
@@ -490,8 +382,8 @@ static uint8_t at_bnsd_format_exe(uint8_t *cmd_name)
 // WPS Command Handlers
 static uint8_t at_bnwps_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[512] = {0};
-    snprintf((char *)buffer, 512,
+    uint8_t buffer[BN_BUFFER_EXTENDED] = {0};
+    snprintf((char *)buffer, BN_BUFFER_EXTENDED,
         "+BNWPS:<t>\r\n"
         "Set WPS timeout in seconds (1-300, 0=cancel)\r\n"
         "\r\n"
@@ -516,12 +408,12 @@ static uint8_t at_bnwps_test(uint8_t *cmd_name)
 
 static uint8_t at_bnwps_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[64] = {0};
+    uint8_t buffer[BN_BUFFER_MEDIUM] = {0};
     
     bnwps_status_t status = bnwps_get_status();
     int status_value = (status == BNWPS_STATUS_ACTIVE) ? 1 : 0;
     
-    snprintf((char *)buffer, 64, "+BNWPS:%d\r\n", status_value);
+    snprintf((char *)buffer, BN_BUFFER_MEDIUM, "+BNWPS:%d\r\n", status_value);
     esp_at_port_write_data(buffer, strlen((char *)buffer));
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -532,33 +424,33 @@ static uint8_t at_bnwps_setup(uint8_t para_num)
     
     // Parse the timeout parameter
     if (esp_at_get_para_as_digit(0, &timeout_seconds) != ESP_AT_PARA_PARSE_RESULT_OK) {
-        printf("ERROR: Invalid timeout parameter\n");
+        ESP_LOGE(TAG, "Invalid timeout parameter");
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // Validate range
     if (timeout_seconds < 0 || timeout_seconds > BNWPS_MAX_TIMEOUT_SECONDS) {
-        printf("ERROR: Timeout must be 0-%u seconds\n", BNWPS_MAX_TIMEOUT_SECONDS);
+        ESP_LOGE(TAG, "Timeout must be 0-%u seconds", BNWPS_MAX_TIMEOUT_SECONDS);
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // Initialize WPS if not already done
     if (!bnwps_init()) {
-        printf("ERROR: Failed to initialize WPS\n");
+        ESP_LOGE(TAG, "Failed to initialize WPS");
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // Start or cancel WPS operation
     bool success = bnwps_start((uint16_t)timeout_seconds);
     if (!success) {
-        printf("ERROR: Failed to start WPS operation\n");
+        ESP_LOGE(TAG, "Failed to start WPS operation");
         return ESP_AT_RESULT_CODE_ERROR;
     }
     
     // For cancel operation (timeout_seconds = 0), send immediate response
     if (timeout_seconds == 0) {
-        uint8_t buffer[32] = {0};
-        snprintf((char *)buffer, 32, "+BNWPS:0\r\n");
+        uint8_t buffer[BN_BUFFER_SMALL] = {0};
+        snprintf((char *)buffer, BN_BUFFER_SMALL, "+BNWPS:0\r\n");
         esp_at_port_write_data(buffer, strlen((char *)buffer));
     }
     
@@ -581,8 +473,8 @@ static uint8_t at_bncert_query_wrapper(uint8_t *cmd_name)
 // Web Radio command handlers
 static uint8_t at_bnweb_radio_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[512] = {0};
-    snprintf((char *)buffer, 512,
+    uint8_t buffer[BN_BUFFER_EXTENDED] = {0};
+    snprintf((char *)buffer, BN_BUFFER_EXTENDED,
         "+BNWEB_RADIO:<enable>[,<url>[,<file_path>]]\r\n"
         "Control web radio streaming with optional SD card saving\r\n"
         "\r\n"
@@ -607,11 +499,11 @@ static uint8_t at_bnweb_radio_query(uint8_t *cmd_name)
     size_t bytes_streamed = 0;
     uint32_t duration_ms = 0;
     
-    char response[256];
+    char response[BN_BUFFER_LARGE];
     if (bnwebradio_is_active() && bnwebradio_get_stats(&bytes_streamed, &duration_ms)) {
         // Get file saving context information
         bool save_to_file = false;
-        char save_file_path[256] = {0};
+        char save_file_path[BN_BUFFER_LARGE] = {0};
         
         if (bnwebradio_get_context_info(&save_to_file, save_file_path, sizeof(save_file_path))) {
             if (save_to_file) {
@@ -678,7 +570,7 @@ static uint8_t at_bnweb_radio_setup(uint8_t para_num)
                     file_param = NULL; // Ignore empty file parameter
                 } else {
                     // Use bnsd_normalize_path_with_mount_point to handle @ prefix and path normalization
-                    static char normalized_path[256]; // Static buffer for normalized path
+                    static char normalized_path[BN_BUFFER_LARGE]; // Static buffer for normalized path
                     
                     // Copy the input path to our buffer first
                     strncpy(normalized_path, (char *)file_param, sizeof(normalized_path) - 1);
@@ -709,8 +601,8 @@ static uint8_t at_bnweb_radio_setup(uint8_t para_num)
 // BNURLCFG Command Handlers - for setting next BNCURL URL as workaround for long commands
 static uint8_t at_bnurlcfg_test(uint8_t *cmd_name)
 {
-    uint8_t buffer[256] = {0};
-    snprintf((char *)buffer, 256,
+    uint8_t buffer[BN_BUFFER_LARGE] = {0};
+    snprintf((char *)buffer, BN_BUFFER_LARGE,
         "+BNURLCFG:<url>\r\n"
         "Set URL for next BNCURL command\r\n"
         "\r\n"
@@ -729,13 +621,13 @@ static uint8_t at_bnurlcfg_test(uint8_t *cmd_name)
 
 static uint8_t at_bnurlcfg_query(uint8_t *cmd_name)
 {
-    uint8_t buffer[512] = {0};
+    uint8_t buffer[BN_BUFFER_EXTENDED] = {0};
     
     const char* configured_url = bncurl_get_configured_url();
     if (configured_url) {
-        snprintf((char *)buffer, 512, "+BNURLCFG:\"%s\"\r\n", configured_url);
+        snprintf((char *)buffer, BN_BUFFER_EXTENDED, "+BNURLCFG:\"%s\"\r\n", configured_url);
     } else {
-        snprintf((char *)buffer, 512, "+BNURLCFG:<not set>\r\n");
+        snprintf((char *)buffer, BN_BUFFER_EXTENDED, "+BNURLCFG:<not set>\r\n");
     }
     
     esp_at_port_write_data(buffer, strlen((char *)buffer));
@@ -771,12 +663,12 @@ static uint8_t at_bnurlcfg_setup(uint8_t para_num)
 }
 
 static const esp_at_cmd_struct at_custom_cmd[] = {
-    {"+BNCURL", at_test_cmd_test, at_query_cmd_test, at_setup_cmd_test, at_exe_cmd_test},
+    {"+BNCURL", at_bncurl_test, at_bncurl_query, at_bncurl_setup, at_bncurl_exe},
     {"+BNURLCFG", at_bnurlcfg_test, at_bnurlcfg_query, at_bnurlcfg_setup, NULL},
     {"+BNCURL_TIMEOUT", at_bncurl_timeout_test, at_bncurl_timeout_query, at_bncurl_timeout_setup, NULL},
     {"+BNCURL_STOP", NULL, at_bncurl_stop_query, NULL, NULL},
     {"+BNCURL_PROG", NULL, at_bncurl_prog_query, NULL, NULL},
-    {"+BNSD_MOUNT", at_bnsd_mount_test, at_bnsd_mount_query, at_bnsd_mount_setup, at_bnsd_mount_exe},
+    {"+BNSD_MOUNT", at_bnsd_mount_test, at_bnsd_mount_query, NULL, at_bnsd_mount_exe},
     {"+BNSD_UNMOUNT", at_bnsd_unmount_test, at_bnsd_unmount_query, NULL, at_bnsd_unmount_exe},
     {"+BNSD_SPACE", at_bnsd_space_test, at_bnsd_space_query, NULL, NULL},
     {"+BNSD_FORMAT", at_bnsd_format_test, at_bnsd_format_query, NULL, at_bnsd_format_exe},
@@ -790,6 +682,13 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
 
 bool esp_at_custom_cmd_register(void)
 {
+    // Initialize NTP for accurate time synchronization
+    ESP_LOGI(TAG, "Initializing SNTP for time synchronization");
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(1, "time.nist.gov");
+    esp_sntp_init();
+    
     // Initialize the executor first
     if (!bncurl_executor_init()) {
         return false;

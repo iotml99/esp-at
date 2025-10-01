@@ -60,26 +60,26 @@ bool bncurl_set_configured_url(const char* url)
 // Function to print parsed parameters
 static void print_bncurl_params(const bncurl_params_t *params)
 {
-    printf("=== BNCURL Parameters ===\n");
-    printf("Method: %s\n", strlen(params->method) > 0 ? params->method : "NULL");
-    printf("URL: %s\n", strlen(params->url) > 0 ? params->url : "NULL");
+    ESP_LOGI(TAG, "=== BNCURL Parameters ===");
+    ESP_LOGI(TAG, "Method: %s", strlen(params->method) > 0 ? params->method : "NULL");
+    ESP_LOGI(TAG, "URL: %s", strlen(params->url) > 0 ? params->url : "NULL");
     
     if (params->header_count > 0) {
-        printf("Headers (%d):\n", params->header_count);
+        ESP_LOGI(TAG, "Headers (%d):", params->header_count);
         for (int i = 0; i < params->header_count; i++) {
-            printf("  [%d]: %s\n", i, params->headers[i]);
+            ESP_LOGI(TAG, "  [%d]: %s", i, params->headers[i]);
         }
     } else {
-        printf("Headers: None\n");
+        ESP_LOGI(TAG, "Headers: None");
     }
     
-    printf("Data Upload (-du): %s\n", strlen(params->data_upload) > 0 ? params->data_upload : "None");
-    printf("Data Download (-dd): %s\n", strlen(params->data_download) > 0 ? params->data_download : "None");
-    printf("Cookie Save (-c): %s\n", strlen(params->cookie_save) > 0 ? params->cookie_save : "None");
-    printf("Cookie Send (-b): %s\n", strlen(params->cookie_send) > 0 ? params->cookie_send : "None");
-    printf("Range (-r): %s\n", strlen(params->range) > 0 ? params->range : "None");
-    printf("Verbose (-v): %s\n", params->verbose ? "Yes" : "No");
-    printf("========================\n");
+    ESP_LOGI(TAG, "Data Upload (-du): %s", strlen(params->data_upload) > 0 ? params->data_upload : "None");
+    ESP_LOGI(TAG, "Data Download (-dd): %s", strlen(params->data_download) > 0 ? params->data_download : "None");
+    ESP_LOGI(TAG, "Cookie Save (-c): %s", strlen(params->cookie_save) > 0 ? params->cookie_save : "None");
+    ESP_LOGI(TAG, "Cookie Send (-b): %s", strlen(params->cookie_send) > 0 ? params->cookie_send : "None");
+    ESP_LOGI(TAG, "Range (-r): %s", strlen(params->range) > 0 ? params->range : "None");
+    ESP_LOGI(TAG, "Verbose (-v): %s", params->verbose ? "Yes" : "No");
+    ESP_LOGI(TAG, "========================");
 }
 
 // Function to initialize parameters structure

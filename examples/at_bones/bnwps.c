@@ -5,6 +5,7 @@
  */
 
 #include "bnwps.h"
+#include "bn_constants.h"
 #include "esp_wifi.h"
 #include "esp_wps.h"
 #include "esp_event.h"
@@ -289,7 +290,7 @@ static void bnwps_wifi_event_handler(void* arg, esp_event_base_t event_base,
             
             // Send error response
             {
-                char error_msg[64];
+                char error_msg[BN_BUFFER_MEDIUM];
                 snprintf(error_msg, sizeof(error_msg), "+CWJAP:1\r\nERROR\r\n");
                 esp_at_port_write_data((uint8_t *)error_msg, strlen(error_msg));
             }
@@ -304,7 +305,7 @@ static void bnwps_wifi_event_handler(void* arg, esp_event_base_t event_base,
             
             // Send timeout error response
             {
-                char error_msg[64];
+                char error_msg[BN_BUFFER_MEDIUM];
                 snprintf(error_msg, sizeof(error_msg), "+CWJAP:2\r\nERROR\r\n");
                 esp_at_port_write_data((uint8_t *)error_msg, strlen(error_msg));
             }
@@ -373,7 +374,7 @@ static void bnwps_timeout_callback(TimerHandle_t xTimer)
     esp_wifi_wps_disable();
     
     // Send timeout error response
-    char error_msg[64];
+    char error_msg[BN_BUFFER_MEDIUM];
     snprintf(error_msg, sizeof(error_msg), "+CWJAP:2\r\nERROR\r\n");
     esp_at_port_write_data((uint8_t *)error_msg, strlen(error_msg));
 }
