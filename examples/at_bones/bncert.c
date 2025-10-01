@@ -5,7 +5,7 @@
  */
 
 #include "bncert.h"
-#include "bncert_manager.h"
+#include "cert_bundle.h"
 #include "bncurl_params.h"
 #include "bnsd.h"
 #include "esp_flash.h"
@@ -25,6 +25,9 @@
 #include <errno.h>
 
 static const char *TAG = "BNCERT";
+
+// External reference to hardcoded CA bundle (from bncurl_common.c)
+extern const char CA_BUNDLE_PEM[];
 
 // Function to validate that file path starts with @ prefix for SD card
 static bool validate_cert_file_path_prefix(const char *file_path)
@@ -60,10 +63,10 @@ bool bncert_init(void)
 
     ESP_LOGI(TAG, "Initializing certificate flashing subsystem");
 
-    // Find the certificate partition
+    // Find the user certificate partition (new dual partition system)
     s_cert_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, NULL);
     if (!s_cert_partition) {
-        ESP_LOGE(TAG, "Certificate partition not found. Please add 'certs' partition to partition table.");
+        ESP_LOGE(TAG, "User certificate partition (certs_user) not found. Please update partition table to dual partition layout.");
         return false;
     }
 
@@ -74,9 +77,14 @@ bool bncert_init(void)
     ESP_LOGI(TAG, "Certificate partition found at 0x%08X (%u bytes)", 
            (unsigned int)s_cert_partition->address, (unsigned int)s_cert_partition->size);
 
-    // Initialize certificate manager for automatic discovery
-    if (!bncert_manager_init()) {
-        ESP_LOGW(TAG, "Certificate manager initialization failed, but basic flashing will still work");
+    // Initialize simplified certificate bundle system with hardcoded CA bundle
+    if (!cert_bundle_init(CA_BUNDLE_PEM, strlen(CA_BUNDLE_PEM))) {
+        ESP_LOGW(TAG, "Certificate bundle system initialization failed, but basic flashing will still work");
+    }
+
+    // Initialize certificate bundle system
+    if (!cert_bundle_init(NULL, 0)) {
+        ESP_LOGW(TAG, "Certificate bundle initialization failed, but basic flashing will still work");
     }
 
     s_bncert_initialized = true;
@@ -91,7 +99,7 @@ void bncert_deinit(void)
     }
 
     ESP_LOGI(TAG, "Deinitializing certificate flashing subsystem");
-    bncert_manager_deinit();
+    cert_bundle_deinit();
     s_cert_partition = NULL;
     s_bncert_initialized = false;
 }
@@ -464,7 +472,7 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
                  (unsigned int)data_size);
 
         // Validate certificate format before flashing
-        if (!bncert_manager_validate_cert(data_buffer, data_size)) {
+        if (!cert_bundle_validate_pem(data_buffer, data_size)) {
             ESP_LOGE(TAG, "Certificate file validation failed: %s", params->file_path);
             free(data_buffer);
             return BNCERT_RESULT_FILE_ERROR;
@@ -481,7 +489,7 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
         }
 
         // Validate certificate format before flashing
-        if (!bncert_manager_validate_cert(data_buffer, data_size)) {
+        if (!cert_bundle_validate_pem(data_buffer, data_size)) {
             ESP_LOGE(TAG, "UART certificate data validation failed");
             return BNCERT_RESULT_UART_ERROR;
         }
@@ -545,15 +553,10 @@ bncert_result_t bncert_flash_certificate(bncert_params_t *params)
         ESP_LOGI(TAG, "Certificate successfully flashed to 0x%08X (%u bytes)", 
                  (unsigned int)params->flash_address, (unsigned int)data_size);
         
-        // Automatically register the certificate with the manager
-        if (bncert_manager_register(params->flash_address, data_size)) {
-            ESP_LOGI(TAG, "Certificate automatically registered with manager");
-        } else {
-            ESP_LOGW(TAG, "Failed to register certificate with manager (flash was successful)");
-        }
-        
-        // Reload all certificates to ensure registry is up to date
-        bncert_manager_reload_certificates();
+        // Note: This is individual certificate flashing for legacy support.
+        // For system certificate bundles, use AT+BNCERT_FLASH command with complete bundle.
+        ESP_LOGI(TAG, "Individual certificate flashed successfully (legacy mode)");
+        ESP_LOGI(TAG, "Individual certificate flashed. Use AT+BNCERT_FLASH for system bundle updates.");
     }
 
 cleanup:

@@ -113,11 +113,14 @@ void bncurl_cleanup_certificates(bncurl_context_t *ctx)
     }
     
     // Clean up certificate data allocated by certificate manager
+    // Note: CA certificate data is now managed by the dynamic bundle system
+    // and should not be freed here (ctx->ca_cert_data is set to NULL when using dynamic bundle)
     if (ctx->ca_cert_data) {
         free(ctx->ca_cert_data);
         ctx->ca_cert_data = NULL;
     }
     
+    // Client certificates are still allocated per-request and need cleanup
     if (ctx->client_cert_data) {
         free(ctx->client_cert_data);
         ctx->client_cert_data = NULL;

@@ -6,7 +6,7 @@
 #include "freertos/semphr.h"
 #include "curl/curl.h"
 #include "esp_at.h"
-#include "bncert_manager.h"
+#include "cert_bundle.h"
 #include "bnsd.h"
 #include <string.h>
 #include <stdio.h>
@@ -392,15 +392,17 @@ static void webradio_task(void *pvParameters)
     if (strncmp(g_webradio_ctx.url, "https://", 8) == 0) {
         ESP_LOGI(TAG, "HTTPS stream detected, configuring SSL");
         
-        // Try certificate manager integration first
+        // Try certificate bundle integration first
         bool ssl_configured = false;
-        if (bncert_manager_init()) {
-            // Use partition certificates if available
-            size_t cert_count = bncert_manager_get_cert_count();
-            if (cert_count > 0) {
-                ESP_LOGI(TAG, "Using certificate manager for SSL");
-                // Note: Certificate manager integration would be added here
-                // For now, use permissive settings
+        if (cert_bundle_init(NULL, 0)) {
+            // Use certificate bundle if available
+            const char *cert_bundle;
+            size_t bundle_size;
+            if (cert_bundle_get(&cert_bundle, &bundle_size) == CERT_BUNDLE_OK && cert_bundle != NULL) {
+                ESP_LOGI(TAG, "Using certificate bundle for SSL (size: %zu)", bundle_size);
+                // Set up SSL with certificate bundle
+                curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, cert_bundle);
+                ssl_configured = true;
             }
         }
         

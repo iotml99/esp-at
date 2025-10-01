@@ -8,7 +8,7 @@
 #include "bncurl_methods.h"
 #include "bncurl_config.h"
 #include "bncurl_cookies.h"
-#include "bncert_manager.h"
+#include "cert_bundle.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -70,8 +70,47 @@ size_t bncurl_combined_header_callback(char *buffer, size_t size, size_t nitems,
 }
 
 /* Hardcoded CA bundle for HTTPS support */
-static const char CA_BUNDLE_PEM[] =
+const char CA_BUNDLE_PEM[] =
 /* Amazon Root CA 1 - for AWS/Amazon services */
+"-----BEGIN CERTIFICATE-----\n"
+"MIIG5jCCBc6gAwIBAgIQT0UaOwW0bnvATrvIc88vkDANBgkqhkiG9w0BAQsFADCB"
+"lTELMAkGA1UEBhMCR0IxGzAZBgNVBAgTEkdyZWF0ZXIgTWFuY2hlc3RlcjEQMA4G"
+"A1UEBxMHU2FsZm9yZDEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMT0wOwYDVQQD"
+"EzRTZWN0aWdvIFJTQSBPcmdhbml6YXRpb24gVmFsaWRhdGlvbiBTZWN1cmUgU2Vy"
+"dmVyIENBMB4XDTI1MDMxMDAwMDAwMFoXDTI2MDQxMDIzNTk1OVowWDELMAkGA1UE"
+"BhMCR0IxDzANBgNVBAgTBkxvbmRvbjEZMBcGA1UEChMQT3BlbndlYXRoZXIgTHRk"
+"LjEdMBsGA1UEAwwUKi5vcGVud2VhdGhlcm1hcC5vcmcwggEiMA0GCSqGSIb3DQEB"
+"AQUAA4IBDwAwggEKAoIBAQDez9ygRdpOOVi6hV8iixWWqex/6XWQz4vQMT9ubDLG"
+"bCjETHhVSgZcM7P2zfKp6hCA95+9GGBsCQBZoeVXpYIqd3xyL+c+eImtS5rdUgCu"
+"nKQ7xLJKZeP4Dp/oIrK722sVbU06Rt6EyB9uTWs+Da/Jtqv/Klg2DvH3jooaYudZ"
+"WuEPFG6efH8GB3IWEHL7199b7uq1w72/344gqJuIoSfVsRp8RTh3k79UIIKm1ira"
+"XYwWSPRFU840HcdJZbqDfmxDxzdFCKlepUZ5w3WpYFpWq8F5SbiEepllY80gTugO"
+"vvAEuJjRNsRR0tLzrP7op/Gvbutqp+BDEm4dGtvBcKHrAgMBAAGjggNsMIIDaDAf"
+"BgNVHSMEGDAWgBQX2dYlJ2f5McJJQ9kwNkSMbKlP6zAdBgNVHQ4EFgQUS2G3/XaE"
+"XKrnDtu7hjMJz2oRokowDgYDVR0PAQH/BAQDAgWgMAwGA1UdEwEB/wQCMAAwHQYD"
+"VR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMEoGA1UdIARDMEEwNQYMKwYBBAGy"
+"MQECAQMEMCUwIwYIKwYBBQUHAgEWF2h0dHBzOi8vc2VjdGlnby5jb20vQ1BTMAgG"
+"BmeBDAECAjBaBgNVHR8EUzBRME+gTaBLhklodHRwOi8vY3JsLnNlY3RpZ28uY29t"
+"L1NlY3RpZ29SU0FPcmdhbml6YXRpb25WYWxpZGF0aW9uU2VjdXJlU2VydmVyQ0Eu"
+"Y3JsMIGKBggrBgEFBQcBAQR+MHwwVQYIKwYBBQUHMAKGSWh0dHA6Ly9jcnQuc2Vj"
+"dGlnby5jb20vU2VjdGlnb1JTQU9yZ2FuaXphdGlvblZhbGlkYXRpb25TZWN1cmVT"
+"ZXJ2ZXJDQS5jcnQwIwYIKwYBBQUHMAGGF2h0dHA6Ly9vY3NwLnNlY3RpZ28uY29t"
+"MDMGA1UdEQQsMCqCFCoub3BlbndlYXRoZXJtYXAub3JnghJvcGVud2VhdGhlcm1h"
+"cC5vcmcwggF9BgorBgEEAdZ5AgQCBIIBbQSCAWkBZwB1AJaXZL9VWJet90OHaDcI"
+"Qnfp8DrV9qTzNm5GpD8PyqnGAAABlYD2g6UAAAQDAEYwRAIgbOk7De/23Y+kAcIz"
+"0UQeR8CnzxY4XvloLvOWpbvK7XYCIFQ5L18pKmCgUm8dSKhszz34SHspwx3M++dw"
+"+r2OKI/fAHYAGYbUxyiqb/66A294Kk0BkarOLXIxD67OXXBBLSVMx9QAAAGVgPaD"
+"ggAABAMARzBFAiBkfIaw27H3oE4ywuhdv6VMG1/mT9U0v+T+0xcRCCTJHAIhAI0y"
+"L1YA4cSQ/FYUSpSvUloNI9xz0IMkmhHnNGgz6XSqAHYAyzj3FYl8hKFEX1vB3fvJ"
+"bvKaWc1HCmkFhbDLFMMUWOcAAAGVgPaDrAAABAMARzBFAiEA7+0Lopd0v6NPstlB"
+"HHbGl3/QRlbYKRivzoafxNCOUCMCIB834fDX2cTykcFaGkhJtRIHNqvaqKdpQ2M6"
+"vTNf6wczMA0GCSqGSIb3DQEBCwUAA4IBAQCWy6Rd4qLxQaf9qjksvrir1z43PTu0"
+"ye8tKXUFiIhL9UKhgXODNltW1B3eUcGOxv49bxPgiRNOBsVdsW4wVRM54Wm2WkzU"
+"PMaPVeSY2CTv3UE2lxW1yil9xfIvgibrNkig5DDIN62LgrqeKY/P/g1d43EQ2PCr"
+"gjZLvs/XAGUxhsfXJPvw/eeOMtvym5YBgHJ69gmVlDerK9aIT9xxl0fxINaNs02E"
+"jJzzRaJfVJoRGPTz6fy1Gsf6nTMI+RutiSxteZHwXXLpeqUKvJnX23/QfDQ+lzYJ"
+"hrhm8OajSkgLZclOz2Tv4ldw9atzH/jcjcWbHzAtrAnasRbh5O9aEiw2\n"
+"-----END CERTIFICATE-----\n"
 "-----BEGIN CERTIFICATE-----\n"
 "MIIEkjCCA3qgAwIBAgITBn+USionzfP6wq4rAfkI7rnExjANBgkqhkiG9w0BAQsF"
 "ADCBmDELMAkGA1UEBhMCVVMxEDAOBgNVBAgTB0FyaXpvbmExEzARBgNVBAcTClNj"
@@ -688,130 +727,56 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
     curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
     curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
     
-    // Configure HTTPS/TLS settings with certificate manager integration
+    // Configure HTTPS/TLS settings with simplified certificate bundle
     if (strncmp(ctx->params.url, "https://", 8) == 0) {
-        ESP_LOGI(TAG, "HTTPS detected - configuring SSL with certificate manager integration");
+        ESP_LOGI(TAG, "HTTPS detected - configuring SSL with simplified certificate bundle");
         
-        // Certificate Manager Integration with Smart Fallback Strategy
         bool ca_configured = false;
-        bool client_configured = false;
         
-        // Strategy 1: Try partition certificates first if manager is initialized
-        if (bncert_manager_init()) {
-            size_t cert_count = bncert_manager_get_cert_count();
-            
-            if (cert_count > 0) {
-                ESP_LOGI(TAG, "Found %u certificates in partition, attempting to configure TLS", 
-                         (unsigned int)cert_count);
-                
-                // Scan all certificates and configure them
-                for (size_t i = 0; i < BNCERT_MAX_CERTIFICATES; i++) {
-                    bncert_metadata_t cert_meta;
-                    if (!bncert_manager_get_cert_by_index(i, &cert_meta)) {
-                        continue;
-                    }
-                    
-                    uint8_t *cert_data = NULL;
-                    if (!bncert_manager_load_cert(cert_meta.address, cert_meta.size, &cert_data)) {
-                        ESP_LOGW(TAG, "Failed to load certificate at 0x%08X", (unsigned int)cert_meta.address);
-                        continue;
-                    }
-                    
-                    // Validate certificate format
-                    if (!bncert_manager_validate_cert(cert_data, cert_meta.size)) {
-                        ESP_LOGW(TAG, "Invalid certificate format at 0x%08X", (unsigned int)cert_meta.address);
-                        free(cert_data);
-                        continue;
-                    }
-                    
-                    // Detect certificate type
-                    int cert_type = bncert_manager_detect_cert_type(cert_data, cert_meta.size);
-                    
-                    if (cert_type == 1 && !ca_configured) {
-                        // Configure as CA certificate (partition takes precedence over hardcoded)
-                        struct curl_blob ca_blob = { 
-                            .data = cert_data, 
-                            .len = cert_meta.size, 
-                            .flags = CURL_BLOB_NOCOPY 
-                        };
-                        
-                        CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca_blob);
-                        if (ca_result == CURLE_OK) {
-                            ESP_LOGI(TAG, "Using CA certificate from partition (%u bytes) - overriding hardcoded bundle", 
-                                     (unsigned int)cert_meta.size);
-                            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-                            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-                            ca_configured = true;
-                            
-                            // Store CA cert data pointer for cleanup later
-                            ctx->ca_cert_data = cert_data;
-                        } else {
-                            ESP_LOGW(TAG, "Failed to set CA certificate from partition");
-                            free(cert_data);
-                        }
-                    } else if (cert_type == 1 && ca_configured && !client_configured) {
-                        // Configure as client certificate
-                        struct curl_blob client_cert_blob = { 
-                            .data = cert_data, 
-                            .len = cert_meta.size, 
-                            .flags = CURL_BLOB_NOCOPY 
-                        };
-                        
-                        CURLcode cert_result = curl_easy_setopt(curl, CURLOPT_SSLCERT_BLOB, &client_cert_blob);
-                        if (cert_result == CURLE_OK) {
-                            ESP_LOGI(TAG, "Using client certificate from partition (%u bytes)", 
-                                     (unsigned int)cert_meta.size);
-                            ctx->client_cert_data = cert_data;
-                            client_configured = true;
-                        } else {
-                            ESP_LOGW(TAG, "Failed to set client certificate from partition");
-                            free(cert_data);
-                        }
-                    } else if (cert_type == 2 && client_configured) {
-                        // Configure as client key
-                        struct curl_blob client_key_blob = { 
-                            .data = cert_data, 
-                            .len = cert_meta.size, 
-                            .flags = CURL_BLOB_NOCOPY 
-                        };
-                        
-                        CURLcode key_result = curl_easy_setopt(curl, CURLOPT_SSLKEY_BLOB, &client_key_blob);
-                        if (key_result == CURLE_OK) {
-                            ESP_LOGI(TAG, "Using client key from partition (%u bytes)", 
-                                     (unsigned int)cert_meta.size);
-                            ctx->client_key_data = cert_data;
-                        } else {
-                            ESP_LOGW(TAG, "Failed to set client key from partition");
-                            free(cert_data);
-                        }
-                    } else if (cert_type == 2 && !client_configured) {
-                        // Found private key but no client certificate yet - store for later
-                        ESP_LOGI(TAG, "Found private key in partition, waiting for client certificate");
-                        free(cert_data); // Free for now, will be loaded again if needed
-                    } else {
-                        // Certificate not needed or duplicate
-                        free(cert_data);
-                    }
-                }
-            } else {
-                ESP_LOGI(TAG, "No certificates found in partition");
-            }
-        }
+        // Try to get certificate bundle from flash (zero RAM usage)
+        const char *bundle_ptr = NULL;
+        size_t bundle_size = 0;
+        cert_bundle_result_t bundle_result = cert_bundle_get(&bundle_ptr, &bundle_size);
         
-        // Strategy 2: Use hardcoded CA bundle if no partition CA certificate was configured
-        if (!ca_configured) {
-            ESP_LOGI(TAG, "Using hardcoded CA bundle for SSL verification");
-            struct curl_blob ca = { .data=(void*)CA_BUNDLE_PEM, .len=sizeof(CA_BUNDLE_PEM)-1, .flags=CURL_BLOB_COPY };
-            CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca);
+        if (bundle_result == CERT_BUNDLE_OK && bundle_ptr != NULL && bundle_size > 0) {
+            // Use certificate bundle - either from flash or hardcoded fallback
+            struct curl_blob ca_bundle = { 
+                .data = (void*)bundle_ptr, 
+                .len = bundle_size, 
+                .flags = CURL_BLOB_NOCOPY 
+            };
             
+            CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca_bundle);
             if (ca_result == CURLE_OK) {
-                ESP_LOGI(TAG, "Embedded CA bundle configured successfully");
+                ESP_LOGI(TAG, "Certificate bundle configured (%u bytes)", 
+                         (unsigned int)bundle_size);
                 curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
                 curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
                 ca_configured = true;
             } else {
-                ESP_LOGW(TAG, "Embedded CA bundle failed, using permissive SSL settings");
-                // Strategy 3: Use permissive settings for broader compatibility
+                ESP_LOGW(TAG, "Failed to configure certificate bundle");
+            }
+        } else {
+            ESP_LOGW(TAG, "Certificate bundle not available: %s", cert_bundle_result_to_string(bundle_result));
+        }
+        
+        // Fallback: Use basic hardcoded CA bundle if dynamic bundle failed
+        if (!ca_configured) {
+            ESP_LOGW(TAG, "Dynamic bundle failed, falling back to basic hardcoded CA bundle");
+            struct curl_blob ca = { 
+                .data = (void*)CA_BUNDLE_PEM, 
+                .len = sizeof(CA_BUNDLE_PEM)-1, 
+                .flags = CURL_BLOB_COPY 
+            };
+            CURLcode ca_result = curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &ca);
+            
+            if (ca_result == CURLE_OK) {
+                ESP_LOGI(TAG, "Basic hardcoded CA bundle configured successfully");
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+                ca_configured = true;
+            } else {
+                ESP_LOGW(TAG, "All CA bundle configurations failed, using permissive SSL settings");
                 curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable peer verification
                 curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
                 curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
@@ -819,12 +784,10 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
         }
         
         // Log final configuration
-        if (ca_configured && client_configured) {
-            ESP_LOGI(TAG, "SSL configured with CA certificate and client authentication");
-        } else if (ca_configured) {
-            ESP_LOGI(TAG, "SSL configured with CA certificate only");
+        if (ca_configured) {
+            ESP_LOGI(TAG, "SSL configured with certificate bundle for server verification");
         } else {
-            ESP_LOGI(TAG, "SSL configured in permissive mode");
+            ESP_LOGI(TAG, "SSL configured in permissive mode (no certificate verification)");
         }
         
         // Common SSL settings for better compatibility
@@ -896,13 +859,8 @@ bool bncurl_common_execute_request(bncurl_context_t *ctx, bncurl_stream_context_
             ESP_LOGE(TAG, "Or check if the service supports a different certificate authority");
         } else if (res == CURLE_PEER_FAILED_VERIFICATION) {
             ESP_LOGE(TAG, "SSL certificate verification failed - certificate not trusted");
-            ESP_LOGE(TAG, "Certificate authority may not be in embedded CA bundle");
-            ESP_LOGE(TAG, "For api.openweathermap.org, this is a known limitation");
-            ESP_LOGE(TAG, "Consider using HTTP endpoints when available for testing");
         } else if (res == CURLE_SSL_CACERT) {
             ESP_LOGE(TAG, "SSL CA certificate problem - certificate authority not recognized");
-            ESP_LOGE(TAG, "The embedded CA bundle may not include this service's certificate authority");
-            ESP_LOGE(TAG, "This is common with some API services like OpenWeatherMap");
         } else {
             ESP_LOGE(TAG, "Curl error: %s (code: %d)", curl_easy_strerror(res), res);
         }

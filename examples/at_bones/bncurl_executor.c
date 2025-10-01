@@ -19,7 +19,6 @@
 #include <stdio.h>
 #include "esp_at.h"
 #include "esp_log.h"
-#include "bnkill.h"
 
 static const char *TAG = "BNCURL_EXECUTOR";
 
@@ -144,9 +143,6 @@ bool bncurl_executor_init(void)
     // Initialize curl globally
     curl_global_init(CURL_GLOBAL_ALL);
     
-    // Initialize kill switch system
-    bnkill_init();
-    
     ESP_LOGI(TAG, "BNCURL executor initialized successfully");
     return true;
 }
@@ -194,12 +190,6 @@ bool bncurl_executor_submit_request(bncurl_context_t *ctx)
 {
     if (!g_executor || !ctx) {
         ESP_LOGE(TAG, "Executor not initialized or invalid context");
-        return false;
-    }
-    
-    // Perform kill switch check before executing any BNCURL command
-    if (!bnkill_check_expiry()) {
-        ESP_LOGE(TAG, "FIRMWARE EXPIRED");
         return false;
     }
     
