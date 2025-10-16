@@ -16,34 +16,47 @@ This document provides step-by-step instructions for building the ESP-AT firmwar
 ```powershell
 git clone https://github.com/iotml99/esp-at.git
 cd esp-at
-$Env:IDF_TOOLS_PATH = "$PWD\.idf_tools"
 ```
 
-### 2. Install ESP-IDF Tools
+### 2. Automated Setup with esp-at-setup.ps1
 
-The ESP-AT project includes ESP-IDF as a submodule. Install the required tools:
+The ESP-AT project includes an automated setup script that handles both environment setup and dependency installation:
 
+#### First-Time Setup (Required)
 ```powershell
-python .\build.py install
-.\esp-idf\install.ps1
-pip install xlrd
+.\esp-at-setup.ps1 -i
 ```
 
-This will:
+**Use the `-i` option for initial setup only.** This single command will:
+- Set `IDF_TOOLS_PATH` to use local `.idf_tools` directory
+- Install `xlrd` Python package (required for Excel file processing)
+- Apply MQTT client patches (removes duplicate function definitions)
+- Run `python build.py install` to install ESP-AT dependencies
+- Activate ESP-IDF environment with `.\esp-idf\export.ps1`
 - Install all ESP-IDF compilation tools (gcc, cmake, ninja, etc.)
 - Set up Python virtual environment with required packages
 - Install target-specific tools for ESP32, ESP32-C2, ESP32-C3, ESP32-C5, ESP32-C6, and ESP32-S2
 
-### 3. Activate ESP-IDF Environment
+#### Daily Development (Environment Activation Only)
+```powershell
+.\esp-at-setup.ps1
+```
 
-**Important**: You must run this command in every new PowerShell session before building:
+**For daily development, use the script without `-i` parameter.** This will only activate the ESP-IDF environment without reinstalling dependencies.
+
+### 3. Daily Development Workflow
+
+**Important**: You must activate the ESP-IDF environment in every new PowerShell session before building:
 
 ```powershell
-.\esp-idf\export.ps1
+.\esp-at-setup.ps1  # Environment activation (no -i parameter for daily use)
 ```
+
+**Note**: Do NOT use the `-i` parameter for daily development - it's only needed for first-time setup.
 
 This sets up:
 - `IDF_PATH` environment variable
+- `IDF_TOOLS_PATH` pointing to local `.idf_tools` directory
 - Python virtual environment activation
 - Tool paths in `PATH`
 - ESP-IDF specific environment variables
@@ -88,19 +101,14 @@ The build uses configuration from:
 
 ## Flashing the Firmware
 
-### Option 1: Using idf.py
-```powershell
-idf.py flash
-```
+Use the build.py script for flashing (Recommended):
 
-### Option 2: Using esptool directly
 ```powershell
-python -m esptool --chip esp32c6 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size 4MB --flash_freq 80m 0x0 build\bootloader\bootloader.bin 0x8000 build\partition_table\partition-table.bin 0xe000 build\ota_data_initial.bin 0x1e000 build\at_customize.bin 0x1f000 build\customized_partitions\mfg_nvs.bin 0x40000 build\esp-at.bin
-```
+# Build the firmware
+python build.py build
 
-### Option 3: Flash factory image
-```powershell
-python -m esptool --chip esp32c6 write_flash 0x0 build\factory\factory_ESP32C6-4MB.bin
+# Flash and monitor with merged binary
+python build.py flash monitor -p COM3 merge-bin  # Replace COM3 with your port
 ```
 
 ## Troubleshooting
@@ -120,18 +128,27 @@ python -m esptool --chip esp32c6 write_flash 0x0 build\factory\factory_ESP32C6-4
 
 **Problem**: Environment variables not set correctly.
 
-**Solution**: Use the build.py script instead of calling idf.py directly:
+**Solution**: Ensure environment is properly activated and use the ESP-AT build script:
 ```powershell
-python build.py build
+.\esp-at-setup.ps1  # Activate environment (no -i parameter)
+python build.py build  # Then build
 ```
 
 #### 3. MQTT Compilation Errors (Function Redefinition)
 
-**Problem**: Outdated patches causing duplicate function definitions.
+**Problem**: Outdated patches causing duplicate function definitions in mqtt_client.c.
 
-**Solution**: This has been fixed in the current build. If you encounter similar issues:
+**Solution**: Use the automated setup script which handles this automatically:
+```powershell
+.\esp-at-setup.ps1 -i
+```
+
+The script automatically removes duplicate function definitions (lines 1593-1617) from `esp-idf/components/mqtt/esp-mqtt/mqtt_client.c`.
+
+**Manual Fix** (if needed):
 1. Check `patches/mqtt.patch`
-2. Ensure no duplicate function definitions in `esp-idf/components/mqtt/esp-mqtt/mqtt_client.c`
+2. Remove duplicate `mqtt_resend_pubrel` function from mqtt_client.c (lines 1593-1617)
+3. Ensure no other duplicate function definitions exist
 
 #### 4. Python Environment Issues
 
@@ -179,24 +196,29 @@ The project applies several patches during build:
 
 ## Development Workflow
 
-### 1. Setup (One-time)
+### 1. Initial Setup (One-time)
 ```powershell
 git clone https://github.com/iotml99/esp-at.git
 cd esp-at
-.\esp-idf\install.ps1
+$Env:IDF_TOOLS_PATH = "$PWD\.idf_tools"
+
+# First-time setup with dependencies (use -i only once)
+.\esp-at-setup.ps1 -i
 ```
 
 ### 2. Daily Development
 ```powershell
-# Start new session
-.\esp-idf\export.ps1
+# Start new session - activate environment (NO -i parameter)
+.\esp-at-setup.ps1
 
 # Make changes to code
 # ...
 
-# Build and test
+# Build firmware
 python build.py build
-idf.py flash monitor
+
+# Flash and monitor with merged binary
+python build.py flash monitor -p COM3 merge-bin  # Replace COM3 with your port
 ```
 
 ### 3. Clean Build (when needed)
