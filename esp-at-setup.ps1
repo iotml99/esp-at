@@ -35,8 +35,28 @@ Write-Host "Setting IDF_TOOLS_PATH to: $Env:IDF_TOOLS_PATH" -ForegroundColor Gre
 # Run install command if -i parameter is provided (before ESP-IDF activation)
 if ($Install) {
     Write-Host "Installing ESP-AT dependencies..." -ForegroundColor Cyan
-    Write-Host "Running: python build.py install" -ForegroundColor White
     
+    Write-Host "Running: pip install xlrd" -ForegroundColor White
+    pip install xlrd
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "pip install xlrd failed with exit code: $LASTEXITCODE" -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+    
+    Write-Host "Modifying MQTT client..." -ForegroundColor White
+    $mqttClientPath = "$ProjectRoot\esp-idf\components\mqtt\esp-mqtt\mqtt_client.c"
+    if (Test-Path $mqttClientPath) {
+        Write-Host "Removing lines 1593-1617 from mqtt_client.c" -ForegroundColor White
+        $content = Get-Content $mqttClientPath
+        $newContent = $content[0..1592] + $content[1617..($content.Length-1)]
+        Set-Content -Path $mqttClientPath -Value $newContent
+        Write-Host "MQTT client modification completed" -ForegroundColor Green
+    } else {
+        Write-Host "Warning: mqtt_client.c not found at expected path" -ForegroundColor Yellow
+    }
+    
+    Write-Host "Running: python build.py install" -ForegroundColor White
     python build.py install
     
     if ($LASTEXITCODE -eq 0) {
@@ -79,11 +99,10 @@ if (Test-Path "$ProjectRoot\esp-idf\export.ps1") {
             Write-Host "Environment is ready for development." -ForegroundColor Cyan
             Write-Host ""
             Write-Host "Available commands:" -ForegroundColor Yellow
-            Write-Host "  python build.py install  # Install dependencies" -ForegroundColor White
-            Write-Host "  python build.py build    # Build the project" -ForegroundColor White
-            Write-Host "  python build.py clean    # Clean build artifacts" -ForegroundColor White
-            Write-Host "  idf.py build            # Direct ESP-IDF build" -ForegroundColor White
-            Write-Host "  idf.py flash            # Flash firmware" -ForegroundColor White
+            Write-Host "  python build.py install                    # Install dependencies" -ForegroundColor White
+            Write-Host "  python build.py build                      # Build the project" -ForegroundColor White
+            Write-Host "  python build.py build flash monitor -p PORT # Build, flash and monitor" -ForegroundColor White
+            Write-Host "  python build.py clean                      # Clean build artifacts" -ForegroundColor White
             Write-Host ""
             Write-Host "Environment activated at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
         }
