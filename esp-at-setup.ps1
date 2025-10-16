@@ -32,6 +32,22 @@ if ($Install) {
 
 Write-Host "Setting IDF_TOOLS_PATH to: $Env:IDF_TOOLS_PATH" -ForegroundColor Green
 
+# Run install command if -i parameter is provided (before ESP-IDF activation)
+if ($Install) {
+    Write-Host "Installing ESP-AT dependencies..." -ForegroundColor Cyan
+    Write-Host "Running: python build.py install" -ForegroundColor White
+    
+    python build.py install
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Install completed successfully!" -ForegroundColor Green
+    } else {
+        Write-Host "Install failed with exit code: $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "Note: ESP-IDF environment may not be activated yet." -ForegroundColor Yellow
+        exit $LASTEXITCODE
+    }
+}
+
 # Check if esp-idf directory exists
 if (Test-Path "$ProjectRoot\esp-idf\export.ps1") {
     Write-Host "Activating ESP-IDF environment..." -ForegroundColor Yellow
@@ -43,41 +59,19 @@ if (Test-Path "$ProjectRoot\esp-idf\export.ps1") {
         Write-Host "ESP-IDF environment activated successfully!" -ForegroundColor Green
         Write-Host "" # Empty line for better readability
         
-        # Install dependencies if requested
         if ($Install) {
-            Write-Host "Installing ESP-AT dependencies..." -ForegroundColor Cyan
-            Write-Host "Running: python build.py install" -ForegroundColor White
-            
-            python build.py install
-            
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "" # Empty line for better readability
-                Write-Host "========================================" -ForegroundColor Green
-                Write-Host "ESP-AT DEPENDENCIES INSTALLED SUCCESSFULLY!" -ForegroundColor Green
-                Write-Host "========================================" -ForegroundColor Green
-                Write-Host ""
-                Write-Host "Environment is now ready for development." -ForegroundColor Cyan
-                Write-Host ""
-                Write-Host "To build the project, run:" -ForegroundColor Yellow
-                Write-Host "  python build.py build" -ForegroundColor White
-                Write-Host ""
-                Write-Host "Installation completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
-            } else {
-                Write-Host "" # Empty line for better readability
-                Write-Host "========================================" -ForegroundColor Red
-                Write-Host "DEPENDENCY INSTALLATION FAILED!" -ForegroundColor Red
-                Write-Host "========================================" -ForegroundColor Red
-                Write-Host "Installation failed with exit code: $LASTEXITCODE" -ForegroundColor Red
-                Write-Host ""
-                Write-Host "Common solutions:" -ForegroundColor Yellow
-                Write-Host "  1. Check installation logs above for specific errors" -ForegroundColor White
-                Write-Host "  2. Ensure internet connection is available" -ForegroundColor White
-                Write-Host "  3. Try running .\esp-idf\install.ps1 manually" -ForegroundColor White
-                Write-Host "  4. Check disk space and permissions" -ForegroundColor White
-                exit $LASTEXITCODE
-            }
-        } else {
             Write-Host "" # Empty line for better readability
+            Write-Host "========================================" -ForegroundColor Green
+            Write-Host "ESP-AT SETUP AND INSTALL COMPLETED!" -ForegroundColor Green
+            Write-Host "========================================" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "Environment is now ready for development." -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "To build the project, run:" -ForegroundColor Yellow
+            Write-Host "  python build.py build" -ForegroundColor White
+            Write-Host ""
+            Write-Host "Installation completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
+        } else {
             Write-Host "========================================" -ForegroundColor Green
             Write-Host "ESP-IDF ENVIRONMENT ACTIVATED!" -ForegroundColor Green
             Write-Host "========================================" -ForegroundColor Green

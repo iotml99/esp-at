@@ -6,12 +6,14 @@ include/sdkconfig.h
 build/
 sdkconfig.old
 .DS_Store
-
+sdkconfig
 *.pyc
 
 # IDF Component Manager
 dependencies.lock
 managed_components/
+.idf_tools/
+esp-idf/
 
 # Doc build artifacts
 docs/_build/
