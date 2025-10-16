@@ -16,7 +16,6 @@
 #include "bnsd.h"
 #include "util.h"
 #include "bnwps.h"
-#include "bncert.h"
 #include "cert_bundle.h"
 #include "bnwebradio.h"
 #include "bn_constants.h"
@@ -673,7 +672,6 @@ static const esp_at_cmd_struct at_custom_cmd[] = {
     {"+BNSD_SPACE", at_bnsd_space_test, at_bnsd_space_query, NULL, NULL},
     {"+BNSD_FORMAT", at_bnsd_format_test, at_bnsd_format_query, NULL, at_bnsd_format_exe},
     {"+BNWPS", at_bnwps_test, at_bnwps_query, at_bnwps_setup, NULL},
-    {"+BNFLASH_CERT", NULL, NULL, at_bncert_flash_cmd, NULL},
     {"+BNCERT_FLASH", NULL, NULL, at_bncert_flash_cmd, NULL},
     {"+BNCERT_CLEAR", NULL, NULL, NULL, at_bncert_clear_cmd},
     {"+BNCERT", NULL, at_bncert_query_wrapper, NULL, NULL},
@@ -716,12 +714,6 @@ bool esp_at_custom_cmd_register(void)
     if (!bnwps_init()) {
         // WPS initialization failure is not fatal, log warning and continue
         ESP_LOGW("AT_BONES", "Failed to initialize WPS subsystem");
-    }
-    
-    // Initialize certificate flashing subsystem
-    if (!bncert_init()) {
-        // Certificate initialization failure is not fatal, log warning and continue
-        ESP_LOGW("AT_BONES", "Failed to initialize certificate flashing subsystem");
     }
     
     // Initialize certificate bundle subsystem
