@@ -16,6 +16,7 @@ This document provides step-by-step instructions for building the ESP-AT firmwar
 ```powershell
 git clone https://github.com/iotml99/esp-at.git
 cd esp-at
+$Env:IDF_TOOLS_PATH = "$PWD\.idf_tools"
 ```
 
 ### 2. Install ESP-IDF Tools
@@ -23,7 +24,9 @@ cd esp-at
 The ESP-AT project includes ESP-IDF as a submodule. Install the required tools:
 
 ```powershell
+python .\build.py install
 .\esp-idf\install.ps1
+pip install xlrd
 ```
 
 This will:
